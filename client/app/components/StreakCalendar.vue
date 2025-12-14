@@ -1,237 +1,124 @@
 <template>
-  <div class="streak-calendar w-full max-w-md mx-auto" ref="containerRef">
-    <!-- Day of week headers -->
-    <div class="grid grid-cols-[40px_repeat(7,1fr)] gap-1 mb-2 sticky top-0 bg-white z-10 pb-2">
-      <div></div>
-      <div
-        v-for="day in dayLabels"
-        :key="day"
-        class="text-center text-xs font-medium text-gray-500"
-      >
-        {{ day }}
+  <div class="flex flex-col w-full flex-1 p-2">
+    <div class="flex flex-col gap-1 w-full">
+      <!-- Day of week labels at top -->
+      <div class="flex" :style="{ gap: `${cellGap}px` }">
+        <span
+          v-for="day in dayLabels"
+          :key="day"
+          class="text-[10px] text-gray-500 text-center flex-1"
+        >
+          {{ day.charAt(0) }}
+        </span>
+      </div>
+
+      <!-- Contribution grid -->
+      <div class="flex flex-col flex-1" :style="{ gap: `${cellGap}px` }">
+        <div
+          v-for="(week, weekIndex) in weeks"
+          :key="weekIndex"
+          class="flex"
+          :style="{ gap: `${cellGap}px` }"
+        >
+          <!-- Week cells -->
+          <div
+            v-for="(day, dayIndex) in week"
+            :key="dayIndex"
+            class="rounded-sm transition-transform duration-100 flex-1 aspect-square"
+            :class="getCellClass(day)"
+            :title="day.date.toDateString()"
+          ></div>
+        </div>
       </div>
     </div>
-
-    <!-- Calendar grid with month labels -->
-    <div class="calendar-grid">
-      <template v-for="(month, monthIndex) in visibleMonths" :key="`${month.year}-${month.month}`">
-        <!-- Month rows -->
-        <template v-for="(week, weekIndex) in month.weeks" :key="`${month.year}-${month.month}-${weekIndex}`">
-          <div class="grid grid-cols-[40px_repeat(7,1fr)] gap-1 mb-1">
-            <!-- Month label on first week of month -->
-            <div class="flex items-center justify-end pr-2">
-              <span
-                v-if="weekIndex === 0"
-                class="text-xs font-medium text-gray-400"
-              >
-                {{ month.label }}
-              </span>
-            </div>
-
-            <!-- Day cells -->
-            <div
-              v-for="(day, dayIndex) in week.days"
-              :key="dayIndex"
-              class="flex flex-col items-center"
-            >
-              <!-- Light indicator -->
-              <div
-                class="w-6 h-6 rounded-full flex items-center justify-center transition-colors"
-                :class="getLightClass(day)"
-              ></div>
-              <!-- Day number -->
-              <span
-                class="text-[10px] mt-0.5"
-                :class="day.isCurrentMonth ? 'text-gray-600' : 'text-gray-300'"
-              >
-                {{ day.dayOfMonth }}
-              </span>
-            </div>
-          </div>
-        </template>
-      </template>
-    </div>
-
-    <!-- Loading indicator -->
-    <div v-if="loading" class="flex justify-center py-4">
-      <ElementLoadingSpinner size="sm" />
-    </div>
-
-    <!-- Infinite scroll sentinel -->
-    <div ref="sentinelRef" class="h-4"></div>
   </div>
 </template>
 
 <script lang="ts" setup>
-import type { Press, CalendarMonth, CalendarDay } from "~/types";
+import type { Press } from "~/types";
 
-interface Props {
-  presses: Press[];
-  loading?: boolean;
+interface CalendarDay {
+  date: Date;
+  hasPress: boolean;
 }
 
-const props = withDefaults(defineProps<Props>(), {
-  loading: false,
-});
-
-const emit = defineEmits<{
-  loadMore: [];
+const props = defineProps<{
+  presses: Press[];
 }>();
 
-const containerRef = ref<HTMLElement | null>(null);
-const sentinelRef = ref<HTMLElement | null>(null);
+const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const cellGap = 3;
 
-const dayLabels = ["S", "M", "T", "W", "T", "F", "S"];
+const today = new Date();
+today.setHours(23, 59, 59, 999);
 
-// Create a Set of press dates for quick lookup (YYYY-MM-DD format)
-const pressDateSet = computed(() => {
+const earliest = computed(() => {
+  if (props.presses.length === 0) return today;
+  let min = props.presses[0]!.pressedAt.toDate();
+  for (const press of props.presses) {
+    const d = press.pressedAt.toDate();
+    if (d < min) min = d;
+  }
+  return min;
+});
+
+function formatDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
+    2,
+    "0"
+  )}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+const pressSet = computed(() => {
   const set = new Set<string>();
   for (const press of props.presses) {
-    const date = press.timestamp instanceof Date ? press.timestamp : new Date(press.timestamp);
-    set.add(formatDateKey(date));
+    set.add(formatDateKey(press.pressedAt.toDate()));
   }
   return set;
 });
 
-function formatDateKey(date: Date): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
+// Generate all weeks from earliest press to today
+const weeks = computed(() => {
+  const result: CalendarDay[][] = [];
 
-// Find the date range from presses
-const dateRange = computed(() => {
-  if (props.presses.length === 0) {
-    const today = new Date();
-    return { start: today, end: today };
-  }
+  const startDate = new Date(earliest.value);
+  startDate.setHours(0, 0, 0, 0);
+  const dayOfWeek = startDate.getDay();
+  startDate.setDate(startDate.getDate() - dayOfWeek);
 
-  const dates = props.presses.map((p) =>
-    p.timestamp instanceof Date ? p.timestamp : new Date(p.timestamp)
-  );
-  const sorted = dates.sort((a, b) => a.getTime() - b.getTime());
-  return { start: sorted[0]!, end: sorted[sorted.length - 1]! };
-});
+  const currentDate = new Date(startDate);
 
-// Generate months from earliest press to today
-const visibleMonths = computed<CalendarMonth[]>(() => {
-  const months: CalendarMonth[] = [];
-  const today = new Date();
-  const startDate = props.presses.length > 0 ? dateRange.value.start : today;
+  while (currentDate <= today) {
+    const week: CalendarDay[] = [];
 
-  // Start from the month of the first press
-  let currentDate = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
-  const endDate = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-
-  while (currentDate <= endDate) {
-    months.push(generateMonth(currentDate.getFullYear(), currentDate.getMonth()));
-    currentDate = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1);
-  }
-
-  return months;
-});
-
-function generateMonth(year: number, month: number): CalendarMonth {
-  const weeks: CalendarDay[][] = [];
-  const firstDay = new Date(year, month, 1);
-  const lastDay = new Date(year, month + 1, 0);
-  const startDayOfWeek = firstDay.getDay();
-
-  let currentWeek: CalendarDay[] = [];
-
-  // Fill in days from previous month
-  if (startDayOfWeek > 0) {
-    const prevMonthLastDay = new Date(year, month, 0).getDate();
-    for (let i = startDayOfWeek - 1; i >= 0; i--) {
-      const day = prevMonthLastDay - i;
-      const date = new Date(year, month - 1, day);
-      currentWeek.push({
-        date,
-        dayOfMonth: day,
-        hasPress: pressDateSet.value.has(formatDateKey(date)),
-        isCurrentMonth: false,
+    for (let i = 0; i < 7; i++) {
+      const key = formatDateKey(currentDate);
+      week.push({
+        date: new Date(currentDate),
+        hasPress: pressSet.value.has(key),
       });
+      currentDate.setDate(currentDate.getDate() + 1);
     }
+
+    result.push(week);
   }
 
-  // Fill in days of current month
-  for (let day = 1; day <= lastDay.getDate(); day++) {
-    const date = new Date(year, month, day);
-    currentWeek.push({
-      date,
-      dayOfMonth: day,
-      hasPress: pressDateSet.value.has(formatDateKey(date)),
-      isCurrentMonth: true,
-    });
-
-    if (currentWeek.length === 7) {
-      weeks.push(currentWeek);
-      currentWeek = [];
-    }
-  }
-
-  // Fill in days from next month
-  if (currentWeek.length > 0) {
-    let nextMonthDay = 1;
-    while (currentWeek.length < 7) {
-      const date = new Date(year, month + 1, nextMonthDay);
-      currentWeek.push({
-        date,
-        dayOfMonth: nextMonthDay,
-        hasPress: pressDateSet.value.has(formatDateKey(date)),
-        isCurrentMonth: false,
-      });
-      nextMonthDay++;
-    }
-    weeks.push(currentWeek);
-  }
-
-  const monthNames = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-  ];
-
-  return {
-    year,
-    month,
-    label: monthNames[month]!,
-    weeks: weeks.map((days) => ({ days })),
-  };
-}
-
-function getLightClass(day: CalendarDay): string {
-  if (!day.isCurrentMonth) {
-    return day.hasPress
-      ? "bg-green-200"
-      : "bg-gray-100";
-  }
-  return day.hasPress
-    ? "bg-green-500 shadow-sm shadow-green-300"
-    : "bg-gray-200";
-}
-
-// Infinite scroll with Intersection Observer
-onMounted(() => {
-  if (!sentinelRef.value) return;
-
-  const observer = new IntersectionObserver(
-    (entries) => {
-      if (entries[0]?.isIntersecting && !props.loading) {
-        emit("loadMore");
-      }
-    },
-    { threshold: 0.1 }
-  );
-
-  observer.observe(sentinelRef.value);
-
-  onUnmounted(() => {
-    observer.disconnect();
-  });
+  return result.reverse();
 });
+
+function getCellClass(day: CalendarDay): string {
+  const dateKey = formatDateKey(day.date);
+  const todayKey = formatDateKey(today);
+  const earliestKey = formatDateKey(earliest.value);
+
+  if (dateKey > todayKey) return "bg-transparent";
+  if (dateKey < earliestKey) return "bg-transparent";
+  if (day.hasPress) return "bg-green-500 cursor-pointer hover:scale-110";
+
+  // Alternate gray shades by month (even months lighter, odd months darker)
+  const isEvenMonth = day.date.getMonth() % 2 === 0;
+  return isEvenMonth
+    ? "bg-gray-200 dark:bg-gray-600 cursor-pointer hover:scale-110"
+    : "bg-gray-300 dark:bg-gray-500 cursor-pointer hover:scale-110";
+}
 </script>
-
-<style scoped>
-.streak-calendar {
-  max-height: calc(100vh - 200px);
-  overflow-y: auto;
-}
-</style>

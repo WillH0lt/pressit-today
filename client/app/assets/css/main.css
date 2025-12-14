@@ -1,3 +1,4 @@
+@import url("https://fonts.googleapis.com/css2?family=Cascadia+Mono:ital,wght@0,200..700;1,200..700&family=Figtree:ital,wght@0,300..900;1,300..900&family=Roboto:ital,wght@0,100..900;1,100..900&display=swap");
 @import "tailwindcss";
 @import "@nuxt/ui";
 
@@ -5,9 +6,9 @@
   --color-white: #ffffff;
   --color-black: #000000;
   --color-transparent: transparent;
-  --color-primary: #6a58f2;
-  --color-primary-light: #8a76f4;
-  --color-error: #ff4d4f;
+  --color-primary: #b22222;
+  --color-primary-light: #ff714a;
+  --color-error: #ff0000;
   --color-gray-100: #f8f9f9;
   --color-gray-200: #e3e5e8;
   --color-gray-300: #c7ccd1;
@@ -20,11 +21,6 @@
   --default-transition-timing-function: cubic-bezier(0.25, 1, 0.5, 1);
 }
 
-@font-face {
-  font-family: "CascadiaMono";
-  src: url(/fonts/CascadiaMono/CascadiaMono.ttf) format("truetype");
-}
-
 :root {
   font-family: "CascadiaMono", monospace;
 }
@@ -33,9 +29,16 @@
   background: var(--color-primary-light);
 }
 
+html,
+body {
+  background-color: var(--color-gray-700);
+  color: var(--color-gray-200);
+}
+
 .link {
   color: var(--color-primary);
   text-decoration: none;
+  cursor: pointer;
 }
 .link:hover {
   text-decoration: underline;

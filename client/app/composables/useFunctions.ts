@@ -20,8 +20,20 @@ export const useFunctions = () => {
     'claimDevice',
   );
 
+  const unlinkDevice = httpsCallable<void, { success: boolean; message: string }>(
+    functions,
+    'unlinkDevice',
+  );
+
+  const clearPresses = httpsCallable<void, { success: boolean; message: string }>(
+    functions,
+    'clearPresses',
+  );
+
   return {
     createPortalLink,
     claimDevice,
+    unlinkDevice,
+    clearPresses,
   };
 };

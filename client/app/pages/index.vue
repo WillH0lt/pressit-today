@@ -1,25 +1,22 @@
 <template>
-  <div class="flex flex-col w-full min-h-screen items-center gap-6 py-8 px-4">
+  <div
+    class="flex flex-col w-full min-h-screen items-center justify-center py-2 px-4"
+  >
     <!-- Not logged in -->
     <template v-if="!currentUser">
-      <div class="flex flex-col items-center justify-center flex-1 gap-6">
-        <div class="text-2xl font-bold">Daily Streak Tracker</div>
-        <div class="text-gray-600">
-          Track your daily habits with a physical device
-        </div>
-        <UButton @click="loginModal.open()"> Login to Get Started </UButton>
+      <div class="w-full max-w-xs">
+        <Login />
       </div>
     </template>
 
     <!-- Logged in but no device -->
-    <template v-else-if="!userDevice">
-      <div class="flex flex-col items-center justify-center flex-1 gap-6">
-        <div class="text-2xl font-bold">Welcome!</div>
-        <div class="text-gray-600 text-center max-w-md">
-          Link your Streak Tracker device to start tracking your daily habits.
-        </div>
-        <UButton @click="claimModal.open()"> Link Device </UButton>
+    <template v-else-if="!userDocument?.deviceId">
+      <div class="w-full max-w-xs">
+        <LinkDevice />
+      </div>
+      <div class="absolute top-4 right-4">
         <UButton
+          class="cursor-pointer"
           variant="ghost"
           color="neutral"
           size="sm"
@@ -32,25 +29,19 @@
 
     <!-- Logged in with device - Show streak calendar -->
     <template v-else>
-      <div class="w-full max-w-md">
-        <div class="flex items-center justify-between mb-6">
-          <div>
-            <div class="text-xl font-bold">Your Streaks</div>
-            <div class="text-xs text-gray-400 font-mono">
-              {{ userDevice.deviceMac }}
-            </div>
-          </div>
+      <div class="w-full max-w-4xl flex flex-col">
+        <StreakCalendar :presses="presses ?? []" />
+      </div>
+
+      <div class="absolute top-4 right-4">
+        <UDropdownMenu :items="menuItems">
           <UButton
+            icon="i-lucide-menu"
             variant="ghost"
             color="neutral"
             size="sm"
-            @click="signOut(auth)"
-          >
-            Sign Out
-          </UButton>
-        </div>
-
-        <StreakCalendar :presses="presses ?? []" :loading="pressesLoading" />
+          />
+        </UDropdownMenu>
       </div>
     </template>
   </div>
@@ -58,55 +49,95 @@
 
 <script lang="ts" setup>
 import { signOut } from "firebase/auth";
-import { doc } from "firebase/firestore";
-import { ModalLogin, ModalClaimDevice, UButton } from "#components";
+import { doc, Timestamp } from "firebase/firestore";
+import { ModalClearPresses, ModalUnlinkDevice } from "#components";
 
-const overlay = useOverlay();
-const loginModal = overlay.create(ModalLogin);
-const claimModal = overlay.create(ModalClaimDevice);
+interface User {
+  deviceClaimedAt: Timestamp;
+  deviceId: string;
+}
+
+definePageMeta({
+  colorMode: "dark",
+});
 
 const auth = useFirebaseAuth()!;
 const db = useFirestore();
 const currentUser = useCurrentUser();
+const toast = useToast();
+const overlay = useOverlay();
+const { unlinkDevice, clearPresses } = useFunctions();
+
+const clearPressesModal = overlay.create(ModalClearPresses);
+const unlinkDeviceModal = overlay.create(ModalUnlinkDevice);
 
 // Watch user document to check if they have a device
 const userDocRef = computed(() =>
   currentUser.value ? doc(db, "users", currentUser.value.uid) : null
 );
-const userDocument = useDocument(userDocRef);
+const userDocument = useDocument<User>(userDocRef);
 
-const userDevice = computed(() => {
-  if (!userDocument.data.value) return null;
-  const data = userDocument.data.value;
-  if (data.deviceMac) {
-    return {
-      deviceId: data.deviceId as string,
-      deviceMac: data.deviceMac as string,
-      deviceClaimedAt: data.deviceClaimedAt,
-    };
+// Load presses for the device
+const deviceId = computed(() => userDocument.value?.deviceId);
+const { presses } = usePresses(deviceId);
+
+// Menu items for dropdown
+const menuItems = computed(() => {
+  const items = [];
+
+  if (userDocument.value?.deviceId) {
+    items.push([
+      {
+        label: "Clear All",
+        icon: "i-lucide-trash-2",
+        onSelect: handleClearPresses,
+      },
+      {
+        label: "Unlink Device",
+        icon: "i-lucide-unlink",
+        onSelect: handleUnlinkDevice,
+      },
+    ]);
   }
-  return null;
+
+  items.push([
+    {
+      label: "Sign Out",
+      icon: "i-lucide-log-out",
+      onSelect: () => signOut(auth),
+    },
+  ]);
+
+  return items;
 });
 
-// Load presses for the user
-const userId = computed(() => currentUser.value?.uid ?? null);
-const { presses, loading: pressesLoading } = usePresses(userId);
+async function handleClearPresses() {
+  const confirmed = await clearPressesModal.open();
+  if (!confirmed) return;
 
-// Close login modal when user signs in
-watch(
-  currentUser,
-  async (currUser) => {
-    if (currUser) {
-      loginModal.close();
-    }
-  },
-  { immediate: true }
-);
-
-// Close claim modal when device is claimed
-watch(userDevice, (device) => {
-  if (device) {
-    claimModal.close();
+  try {
+    await clearPresses();
+    toast.add({ title: "All presses cleared", color: "success" });
+  } catch (error: any) {
+    toast.add({
+      title: error.message || "Failed to clear presses",
+      color: "error",
+    });
   }
-});
+}
+
+async function handleUnlinkDevice() {
+  const confirmed = await unlinkDeviceModal.open();
+  if (!confirmed) return;
+
+  try {
+    await unlinkDevice();
+    toast.add({ title: "Device unlinked", color: "success" });
+  } catch (error: any) {
+    toast.add({
+      title: error.message || "Failed to unlink device",
+      color: "error",
+    });
+  }
+}
 </script>

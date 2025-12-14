@@ -21,10 +21,11 @@ export default defineNuxtConfig({
         autoImports: ["defineStore", "acceptHMRUpdate"],
       },
     ],
+    "motion-v/nuxt",
   ],
   css: ["~/assets/css/main.css"],
-  colorMode: {
-    preference: "light", // or 'system' or 'dark'
+  ui: {
+    colorMode: true,
   },
   imports: {
     dirs: ["~/stores"],

@@ -1,13 +1,13 @@
 import { collection, query, orderBy } from "firebase/firestore";
 import type { Press } from "~/types";
 
-export const usePresses = (userId: Ref<string | null>) => {
+export const usePresses = (deviceId: Ref<string | null | undefined>) => {
   const db = useFirestore();
 
   const pressesQuery = computed(() => {
-    if (!userId.value) return null;
+    if (!deviceId.value) return null;
     return query(
-      collection(db, "users", userId.value, "presses"),
+      collection(db, "devices", deviceId.value, "presses"),
       orderBy("pressedAt", "asc")
     );
   });

@@ -8,7 +8,13 @@ service cloud.firestore {
     }
 
     match /devices/{deviceId} {
-      allow read, write: if false
+      allow read, write: if false;
+    }
+
+    // Allow users to read presses for devices they have claimed
+    match /devices/{deviceId}/presses/{pressId} {
+      allow read: if request.auth != null
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.deviceId == deviceId;
     }
   }
 }

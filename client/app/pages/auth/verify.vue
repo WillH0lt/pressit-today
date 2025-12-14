@@ -1,14 +1,13 @@
 <template>
-  <div class="min-h-screen flex items-center justify-center bg-gray-50">
+  <div class="min-h-screen flex items-center justify-center">
     <div class="max-w-md w-full space-y-8 p-6">
       <div class="text-center">
         <!-- Loading state -->
+
         <div v-if="isVerifying" class="space-y-4">
-          <ElementLoadingSpinner class="mx-auto text-gray-600" size="xl" />
-          <h2 class="text-2xl font-bold text-gray-900">Signing you in...</h2>
-          <p class="text-gray-600">
-            Please wait while we verify your email link.
-          </p>
+          <ElementLoadingSpinner class="mx-auto" size="xl" />
+          <h2 class="text-2xl font-bold">Signing you in...</h2>
+          <p>Please wait while we verify your email link.</p>
         </div>
 
         <!-- Email input state -->
@@ -41,55 +40,18 @@
 
         <!-- Success state -->
         <div v-else-if="isSuccess" class="space-y-4">
-          <div
-            class="rounded-full bg-green-100 p-3 w-12 h-12 mx-auto flex items-center justify-center"
-          >
-            <svg
-              class="w-6 h-6 text-green-600"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M5 13l4 4L19 7"
-              ></path>
-            </svg>
-          </div>
-          <h2 class="text-2xl font-bold">Welcome to AsciiNotes!</h2>
-          <p class="text-gray-600">You've been successfully signed in.</p>
-          <p class="text-gray-600">Redirecting...</p>
+          <h2 class="text-2xl font-bold">Welcome!</h2>
+          <p>You've been successfully signed in.</p>
+          <p>Redirecting...</p>
         </div>
 
         <!-- Error state -->
         <div v-else-if="errorMessage" class="space-y-4">
-          <div
-            class="rounded-full bg-red-100 p-3 w-12 h-12 mx-auto flex items-center justify-center"
-          >
-            <svg
-              class="w-6 h-6 text-red-600"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M6 18L18 6M6 6l12 12"
-              ></path>
-            </svg>
-          </div>
           <h2 class="text-2xl font-bold">Sign-in failed</h2>
           <p class="text-error">{{ errorMessage }}</p>
           <div class="space-y-2">
             <UButton @click="tryAgain" variant="solid" color="primary" block>
               Try signing in again
-            </UButton>
-            <UButton @click="goHome" variant="outline" color="neutral" block>
-              Go to homepage
             </UButton>
           </div>
         </div>
@@ -104,7 +66,11 @@ import type { FormSubmitEvent } from "@nuxt/ui";
 
 import { AuthErrorText } from "~/constants";
 
-const { signUpWithMagicLink, isValidMagicLink, getStoredEmail } =
+definePageMeta({
+  colorMode: "dark",
+});
+
+const { signInWithMagicLink, isValidMagicLink, getStoredEmail } =
   useEmailAuth();
 const router = useRouter();
 
@@ -141,7 +107,7 @@ async function verifyEmailLink(inputEmail?: string) {
     }
 
     // Sign in the user with the email link
-    await signUpWithMagicLink(url, email);
+    await signInWithMagicLink(url, email);
 
     // Show success state
     isVerifying.value = false;
@@ -180,12 +146,5 @@ function goHome() {
 
 const auth = useFirebaseAuth()!;
 
-onMounted(() => {
-  // wait for anonymous user to be set up
-  auth.onAuthStateChanged((user) => {
-    if (user) {
-      verifyEmailLink();
-    }
-  });
-});
+verifyEmailLink();
 </script>
