@@ -1,0 +1,38 @@
+{
+  "name": "asciinotes-com",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "packageManager": "pnpm@8.13.1",
+  "scripts": {
+    "build": "nuxt build",
+    "cleanup": "pnpm dlx nuxi cleanup",
+    "dev": "nuxt dev",
+    "emulators": "firebase emulators:start",
+    "generate": "nuxt generate",
+    "postinstall": "nuxt prepare",
+    "preview": "nuxt preview"
+  },
+  "dependencies": {
+    "@nuxt/ui": "^4.1.0",
+    "@pinia/nuxt": "^0.11.2",
+    "@vueuse/components": "^14.0.0",
+    "@vueuse/core": "^14.0.0",
+    "@vueuse/nuxt": "^14.0.0",
+    "consola": "^3.4.2",
+    "firebase": "^12.5.0",
+    "nuxt": "4.2.0",
+    "nuxt-vuefire": "^1.1.0",
+    "pinia": "^3.0.3",
+    "vue": "^3.5.22",
+    "vue-router": "^4.6.3",
+    "vuefire": "^3.2.2",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.21",
+    "firebase-admin": "^13.5.0",
+    "postcss": "^8.5.6",
+    "tsx": "^4.20.6"
+  }
+}
