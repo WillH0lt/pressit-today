@@ -22,6 +22,7 @@ export default defineNuxtConfig({
       },
     ],
     "motion-v/nuxt",
+    "@nuxt/test-utils/module",
   ],
   css: ["~/assets/css/main.css"],
   ui: {

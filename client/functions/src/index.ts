@@ -242,7 +242,10 @@ export const clearPresses = onCall(async (request: CallableRequest) => {
     throw new HttpsError("failed-precondition", "No device linked");
   }
 
-  const pressesRef = db.collection("devices").doc(deviceId).collection("presses");
+  const pressesRef = db
+    .collection("devices")
+    .doc(deviceId)
+    .collection("presses");
   const pressesSnapshot = await pressesRef.get();
 
   if (pressesSnapshot.empty) {
@@ -261,5 +264,40 @@ export const clearPresses = onCall(async (request: CallableRequest) => {
   return {
     success: true,
     message: "All presses cleared successfully",
+  };
+});
+
+/**
+ * Cloud function to delete a user's account and all associated data.
+ *
+ * This function:
+ * 1. Verifies the user is authenticated
+ * 2. Deletes all presses from the user's linked device (if any)
+ * 3. Deletes the user document from Firestore
+ * 4. Deletes the user from Firebase Auth
+ */
+export const deleteAccount = onCall(async (request: CallableRequest) => {
+  if (!request.auth) {
+    throw new HttpsError(
+      "unauthenticated",
+      "Must be logged in to delete account"
+    );
+  }
+
+  const uid = request.auth.uid;
+  const userRef = db.collection("users").doc(uid);
+  const userDoc = await userRef.get();
+
+  if (userDoc.exists) {
+    // Delete the user document
+    await userRef.delete();
+  }
+
+  // Delete the user from Firebase Auth
+  await admin.auth().deleteUser(uid);
+
+  return {
+    success: true,
+    message: "Account deleted successfully",
   };
 });

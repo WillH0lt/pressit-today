@@ -50,7 +50,6 @@
 <script lang="ts" setup>
 import { signOut } from "firebase/auth";
 import { doc, Timestamp } from "firebase/firestore";
-import { ModalClearPresses, ModalUnlinkDevice } from "#components";
 
 interface User {
   deviceClaimedAt: Timestamp;
@@ -64,12 +63,6 @@ definePageMeta({
 const auth = useFirebaseAuth()!;
 const db = useFirestore();
 const currentUser = useCurrentUser();
-const toast = useToast();
-const overlay = useOverlay();
-const { unlinkDevice, clearPresses } = useFunctions();
-
-const clearPressesModal = overlay.create(ModalClearPresses);
-const unlinkDeviceModal = overlay.create(ModalUnlinkDevice);
 
 // Watch user document to check if they have a device
 const userDocRef = computed(() =>
@@ -88,14 +81,14 @@ const menuItems = computed(() => {
   if (userDocument.value?.deviceId) {
     items.push([
       {
-        label: "Clear All",
-        icon: "i-lucide-trash-2",
-        onSelect: handleClearPresses,
+        label: "Stats for Nerds",
+        icon: "i-lucide-glasses",
+        onSelect: () => navigateTo("/statistics"),
       },
       {
-        label: "Unlink Device",
-        icon: "i-lucide-unlink",
-        onSelect: handleUnlinkDevice,
+        label: "Settings",
+        icon: "i-lucide-settings",
+        onSelect: () => navigateTo("/settings"),
       },
     ]);
   }
@@ -110,34 +103,4 @@ const menuItems = computed(() => {
 
   return items;
 });
-
-async function handleClearPresses() {
-  const confirmed = await clearPressesModal.open();
-  if (!confirmed) return;
-
-  try {
-    await clearPresses();
-    toast.add({ title: "All presses cleared", color: "success" });
-  } catch (error: any) {
-    toast.add({
-      title: error.message || "Failed to clear presses",
-      color: "error",
-    });
-  }
-}
-
-async function handleUnlinkDevice() {
-  const confirmed = await unlinkDeviceModal.open();
-  if (!confirmed) return;
-
-  try {
-    await unlinkDevice();
-    toast.add({ title: "Device unlinked", color: "success" });
-  } catch (error: any) {
-    toast.add({
-      title: error.message || "Failed to unlink device",
-      color: "error",
-    });
-  }
-}
 </script>

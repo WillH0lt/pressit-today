@@ -30,10 +30,16 @@ export const useFunctions = () => {
     'clearPresses',
   );
 
+  const deleteAccount = httpsCallable<void, { success: boolean; message: string }>(
+    functions,
+    'deleteAccount',
+  );
+
   return {
     createPortalLink,
     claimDevice,
     unlinkDevice,
     clearPresses,
+    deleteAccount,
   };
 };

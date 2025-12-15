@@ -49,6 +49,9 @@ void sendWebhook(bool state);
 String getMacAddress();
 String getCurrentDate();
 String generateClaimCode();
+bool connectWithSavedCredentials();
+void saveWiFiCredentials(const char* ssid, const char* password);
+void startProvisioningMode();
 
 void setup() {
   Serial.begin(115200);
@@ -76,56 +79,16 @@ void setup() {
   loadStreak();
   updateLEDs();
 
-  // WiFi Provisioning configuration
-  WiFiProvisioner::Config config(
-      "StreakTracker",              // Access Point Name
-      "Streak Tracker Setup",       // HTML Page Title
-      "#4CAF50",                    // Theme Color (green for streaks!)
-      "",                           // No custom SVG
-      "Streak Tracker",             // Project Title
-      "7-Day Habit Tracker",        // Project Sub-title
-      "Connect your streak tracker to WiFi to enable time synchronization.",
-      "Streak Tracker",             // Footer
-      "Connected! Your streak tracker is now syncing time.",
-      "This will erase all settings and streak data.",
-      "",                           // No input field needed
-      0,
-      false,                        // Hide input field
-      true                          // Show reset option
-  );
+  // Try to connect with saved WiFi credentials first
+  if (connectWithSavedCredentials()) {
+    Serial.println("Connected with saved credentials!");
+  } else {
+    // No saved credentials or connection failed - start provisioning
+    Serial.println("No saved credentials or connection failed, starting provisioning...");
+    startProvisioningMode();
+  }
 
-  WiFiProvisioner provisioner(config);
-
-  provisioner.onProvision([]() {
-    Serial.println("Provisioning started...");
-  })
-  .onLoop([]() {
-    // Animate LEDs while waiting for WiFi connection
-    animateLEDs();
-  })
-  .onSuccess([](const char* ssid, const char* password, const char* input) {
-    Serial.printf("Connected to: %s\n", ssid);
-    // Turn off animation LEDs before showing streak
-    for (int i = 0; i < 7; i++) {
-      digitalWrite(LED_PINS[i], LOW);
-    }
-  })
-  .onFactoryReset([]() {
-    Serial.println("Factory reset - clearing streak data");
-    preferences.begin("streak", false);
-    preferences.clear();
-    preferences.end();
-    streakData = 0;
-    todayState = false;
-    updateLEDs();
-  });
-
-  // Start provisioning (blocks until connected)
-  Serial.println("Starting WiFi provisioning...");
-  provisioner.startProvisioning();
-  Serial.println("Provisioning complete!");
-
-  // Restore streak LEDs after provisioning
+  // Restore streak LEDs after WiFi setup
   updateLEDs();
 
   // Sync time after WiFi connects
@@ -428,4 +391,111 @@ String generateClaimCode() {
   }
 
   return code;
+}
+
+// ============== WIFI CREDENTIAL PERSISTENCE ==============
+
+void saveWiFiCredentials(const char* ssid, const char* password) {
+  preferences.begin("wifi", false);
+  preferences.putString("ssid", ssid);
+  preferences.putString("password", password ? password : "");
+  preferences.end();
+  Serial.printf("WiFi credentials saved for SSID: %s\n", ssid);
+}
+
+bool connectWithSavedCredentials() {
+  preferences.begin("wifi", true);  // Read-only
+  String ssid = preferences.getString("ssid", "");
+  String password = preferences.getString("password", "");
+  preferences.end();
+
+  if (ssid.length() == 0) {
+    Serial.println("No saved WiFi credentials found");
+    return false;
+  }
+
+  Serial.printf("Attempting to connect to saved network: %s\n", ssid.c_str());
+
+  // Animate LEDs while connecting
+  WiFi.begin(ssid.c_str(), password.c_str());
+
+  unsigned long startTime = millis();
+  const unsigned long timeout = 15000;  // 15 second timeout
+
+  while (WiFi.status() != WL_CONNECTED && (millis() - startTime) < timeout) {
+    animateLEDs();
+    delay(10);
+  }
+
+  // Turn off animation LEDs
+  for (int i = 0; i < 7; i++) {
+    digitalWrite(LED_PINS[i], LOW);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("Connected to %s, IP: %s\n", ssid.c_str(), WiFi.localIP().toString().c_str());
+    return true;
+  }
+
+  Serial.println("Failed to connect with saved credentials");
+  WiFi.disconnect(true);
+  return false;
+}
+
+void startProvisioningMode() {
+  // WiFi Provisioning configuration
+  WiFiProvisioner::Config config(
+      "StreakTracker",              // Access Point Name
+      "Streak Tracker Setup",       // HTML Page Title
+      "#4CAF50",                    // Theme Color (green for streaks!)
+      "",                           // No custom SVG
+      "Streak Tracker",             // Project Title
+      "7-Day Habit Tracker",        // Project Sub-title
+      "Connect your streak tracker to WiFi to enable time synchronization.",
+      "Streak Tracker",             // Footer
+      "Connected! Your streak tracker is now syncing time.",
+      "This will erase all settings and streak data.",
+      "",                           // No input field needed
+      0,
+      false,                        // Hide input field
+      true                          // Show reset option
+  );
+
+  WiFiProvisioner provisioner(config);
+
+  provisioner.onProvision([]() {
+    Serial.println("Provisioning started...");
+  })
+  .onLoop([]() {
+    // Animate LEDs while waiting for WiFi connection
+    animateLEDs();
+  })
+  .onSuccess([](const char* ssid, const char* password, const char* input) {
+    Serial.printf("Connected to: %s\n", ssid);
+    // Save credentials for next boot
+    saveWiFiCredentials(ssid, password);
+    // Turn off animation LEDs before showing streak
+    for (int i = 0; i < 7; i++) {
+      digitalWrite(LED_PINS[i], LOW);
+    }
+  })
+  .onFactoryReset([]() {
+    Serial.println("Factory reset - clearing all data");
+    // Clear streak data
+    preferences.begin("streak", false);
+    preferences.clear();
+    preferences.end();
+    // Clear WiFi credentials
+    preferences.begin("wifi", false);
+    preferences.clear();
+    preferences.end();
+    streakData = 0;
+    todayState = false;
+    updateLEDs();
+  });
+
+  // Start provisioning (blocks until connected)
+  Serial.println("Starting WiFi provisioning...");
+  provisioner.startProvisioning();
+  Serial.println("Provisioning complete!");
 }
