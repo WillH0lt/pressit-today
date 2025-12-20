@@ -58,8 +58,7 @@
 </template>
 
 <script lang="ts" setup>
-import { signOut, deleteUser } from "firebase/auth";
-import { doc } from "firebase/firestore";
+import { signOut } from "firebase/auth";
 import { onKeyStroke } from "@vueuse/core";
 import {
   ModalClearPresses,
@@ -72,16 +71,11 @@ onKeyStroke("Escape", () => {
   navigateTo("/");
 });
 
-interface User {
-  deviceId: string;
-}
-
 definePageMeta({
   colorMode: "dark",
 });
 
 const auth = useFirebaseAuth()!;
-const db = useFirestore();
 const currentUser = useCurrentUser();
 const toast = useToast();
 const overlay = useOverlay();
@@ -97,12 +91,6 @@ watchEffect(() => {
     navigateTo("/");
   }
 });
-
-// Watch user document to check if they have a device
-const userDocRef = computed(() =>
-  currentUser.value ? doc(db, "users", currentUser.value.uid) : null
-);
-const userDocument = useDocument<User>(userDocRef);
 
 async function handleClearPresses() {
   const confirmed = await clearPressesModal.open();

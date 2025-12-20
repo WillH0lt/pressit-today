@@ -1,6 +1,6 @@
 <template>
   <UApp :toaster="toaster">
-    <NuxtPage />
+    <NuxtPage :transition="{ name: 'page', mode: 'out-in' }" />
   </UApp>
 </template>
 

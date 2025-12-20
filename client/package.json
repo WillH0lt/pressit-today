@@ -33,6 +33,7 @@
   },
   "devDependencies": {
     "@nuxt/test-utils": "^3.21.0",
+    "@types/three": "^0.182.0",
     "@vue/test-utils": "^2.4.6",
     "autoprefixer": "^10.4.21",
     "firebase-admin": "^13.5.0",
