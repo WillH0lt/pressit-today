@@ -7,6 +7,8 @@
   "scripts": {
     "build": "nuxt build",
     "cleanup": "pnpm dlx nuxi cleanup",
+    "fb:deploy": "nuxt generate && npx firebase-tools deploy --only hosting",
+    "fb:deploy:all": "nuxt generate && npx firebase-tools deploy",
     "dev": "nuxt dev",
     "emulators": "firebase emulators:start",
     "generate": "nuxt generate",

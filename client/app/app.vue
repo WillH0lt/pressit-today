@@ -5,9 +5,9 @@
 </template>
 
 <script lang="ts" setup>
-const title = "AsciiNotes - Markdown-Inspired Note-Taking for Programmers";
+const title = "The thing Will gave me";
 const description =
-  "A minimal, markdown-inspired note-taking app for programmers.";
+  "Will gave me this thing. It will end up in a closet some day soon, but for now, it's here.";
 
 useSeoMeta({
   title,

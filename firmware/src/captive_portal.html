@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Streak Tracker Setup</title>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1"
+    />
+    <style>
+      :root {
+        --color-white: #ffffff;
+        --color-black: #000000;
+        --color-primary: #b22222;
+        --color-primary-light: #ba4e4e;
+        --color-error: #ff0000;
+        --color-gray-100: #f8f9f9;
+        --color-gray-200: #e3e5e8;
+        --color-gray-300: #c7ccd1;
+        --color-gray-400: #9099a4;
+        --color-gray-500: #4f5660;
+        --color-gray-600: #2e3338;
+        --color-gray-700: #060607;
+      }
+      * {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          sans-serif;
+        color: var(--color-gray-200);
+        box-sizing: border-box;
+      }
+      body {
+        touch-action: manipulation;
+        background-color: var(--color-gray-700);
+        margin: 0;
+        padding: 2rem 1rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-height: 100vh;
+      }
+      .header {
+        text-align: center;
+        margin-bottom: 1rem;
+      }
+      .header h2 {
+        margin: 0.5rem 0 0.2rem 0;
+      }
+      .header h4 {
+        margin: 0.2rem 0;
+        opacity: 0.7;
+        font-weight: normal;
+      }
+      .header p {
+        opacity: 0.5;
+        max-width: 90%;
+        margin: 0.5rem auto;
+        font-size: 0.9rem;
+      }
+      .card {
+        background-color: var(--color-gray-600);
+        box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.3);
+        border-radius: 0.75rem;
+        max-width: 400px;
+        width: 100%;
+        padding: 1.5rem;
+      }
+      h3 {
+        margin: 0 0 1rem 0;
+        text-align: center;
+      }
+      .network-list {
+        max-height: 250px;
+        overflow-y: auto;
+        margin-bottom: 1rem;
+        border: 1px solid var(--color-gray-500);
+        border-radius: 0.5rem;
+      }
+      .network-item {
+        display: flex;
+        align-items: center;
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid var(--color-gray-500);
+        cursor: pointer;
+      }
+      .network-item:last-child {
+        border-bottom: none;
+      }
+      .network-item:hover {
+        background-color: var(--color-gray-500);
+      }
+      .network-item.selected {
+        background-color: var(--color-primary);
+      }
+      .network-item input[type="radio"] {
+        margin-right: 0.75rem;
+        accent-color: var(--color-primary);
+      }
+      .network-name {
+        flex: 1;
+        font-size: 0.95rem;
+      }
+      .network-signal {
+        opacity: 0.5;
+        font-size: 0.8rem;
+      }
+      .form-group {
+        margin-bottom: 1rem;
+      }
+      label {
+        display: block;
+        font-size: 0.85rem;
+        margin-bottom: 0.25rem;
+        opacity: 0.8;
+      }
+      input[type="text"],
+      input[type="password"] {
+        width: 100%;
+        padding: 0.75rem;
+        border: 1px solid var(--color-gray-500);
+        border-radius: 0.5rem;
+        font-size: 1rem;
+        outline: none;
+        transition: border-color 0.2s;
+        background-color: var(--color-gray-700);
+        color: var(--color-gray-200);
+      }
+      input[type="text"]:focus,
+      input[type="password"]:focus {
+        border-color: var(--color-primary);
+      }
+      .btn {
+        width: 100%;
+        padding: 0.75rem;
+        border: none;
+        border-radius: 0.5rem;
+        font-size: 1rem;
+        cursor: pointer;
+        transition: opacity 0.2s;
+      }
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .btn-primary {
+        background-color: var(--color-primary);
+        color: var(--color-white);
+      }
+      .btn-primary:hover:not(:disabled) {
+        background-color: var(--color-primary-light);
+      }
+      .btn-secondary {
+        background-color: var(--color-gray-500);
+        color: var(--color-gray-200);
+        margin-top: 0.5rem;
+      }
+      .btn:hover:not(:disabled) {
+        opacity: 0.9;
+      }
+      .error {
+        color: var(--color-error);
+        font-size: 0.85rem;
+        margin-top: 0.5rem;
+        text-align: center;
+      }
+      .success {
+        text-align: center;
+        padding: 2rem 1rem;
+      }
+      .success h2 {
+        color: var(--color-primary);
+      }
+      .success .claim-code {
+        background: var(--color-gray-700);
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+      }
+      .success .claim-code .code {
+        font-size: 1.5rem;
+        font-weight: bold;
+        letter-spacing: 0.2rem;
+        font-family: monospace;
+        color: var(--color-gray-100);
+      }
+      .loading {
+        display: inline-block;
+        width: 1rem;
+        height: 1rem;
+        border: 2px solid var(--color-white);
+        border-radius: 50%;
+        border-top-color: transparent;
+        animation: spin 0.8s linear infinite;
+        margin-left: 0.5rem;
+        vertical-align: middle;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .refresh-btn {
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 0.5rem;
+        opacity: 0.6;
+      }
+      .refresh-btn:hover {
+        opacity: 1;
+      }
+      .refresh-btn.spinning svg {
+        animation: spin 0.5s linear infinite;
+      }
+      .hidden {
+        display: none;
+      }
+      .footer {
+        margin-top: 1.5rem;
+        text-align: center;
+      }
+      .footer a {
+        color: var(--color-gray-200);
+        opacity: 0.5;
+        font-size: 0.85rem;
+        text-decoration: none;
+      }
+      .footer a:hover {
+        opacity: 0.8;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card" id="setup-card">
+      <h3>
+        Connect to WiFi
+        <button class="refresh-btn" onclick="loadNetworks()" title="Refresh">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path d="M23 4v6h-6"></path>
+            <path d="M1 20v-6h6"></path>
+            <path
+              d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"
+            ></path>
+          </svg>
+        </button>
+      </h3>
+
+      <div class="network-list" id="network-list">
+        <div style="padding: 2rem; text-align: center; opacity: 0.5">
+          Scanning for networks...
+        </div>
+      </div>
+
+      <div class="form-group hidden" id="hidden-ssid-group">
+        <label for="hidden-ssid">Network Name (SSID)</label>
+        <input type="text" id="hidden-ssid" placeholder="Enter network name" />
+      </div>
+
+      <div class="form-group hidden" id="password-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" placeholder="Enter password" />
+      </div>
+
+      <div class="error hidden" id="error-msg"></div>
+
+      <button
+        class="btn btn-primary"
+        id="connect-btn"
+        onclick="connect()"
+        disabled
+      >
+        Connect
+      </button>
+
+      <div class="footer">
+        <a href="#" onclick="factoryReset(); return false;">Factory Reset</a>
+      </div>
+    </div>
+
+    <div class="card hidden" id="success-card">
+      <div class="success">
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="64"
+          height="64"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="#b22222"
+          stroke-width="2"
+        >
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="16 12 12 8 8 12"></polyline>
+          <line x1="12" y1="16" x2="12" y2="8"></line>
+        </svg>
+        <h2>Connected!</h2>
+        <p id="connected-ssid"></p>
+        <div class="claim-code">
+          <div style="font-size: 0.85rem; opacity: 0.7; margin-bottom: 0.5rem">
+            Your claim code:
+          </div>
+          <div class="code" id="claim-code">--------</div>
+          <div style="font-size: 0.8rem; opacity: 0.5; margin-top: 0.5rem">
+            Use this code to link your device
+          </div>
+        </div>
+        <p style="opacity: 0.6; font-size: 0.9rem">
+          Your device is now provisioned and ready to use.
+        </p>
+      </div>
+    </div>
+
+    <div class="card hidden" id="reset-card">
+      <div style="text-align: center; padding: 1rem">
+        <h3>Factory Reset</h3>
+        <p>Are you sure you want to reset the device to factory settings?</p>
+        <p style="color: gray; font-size: 0.85rem">
+          This will erase all settings and streak data.
+        </p>
+        <div style="display: flex; gap: 1rem; margin-top: 1.5rem">
+          <button
+            class="btn btn-secondary"
+            style="flex: 1"
+            onclick="cancelReset()"
+          >
+            Cancel
+          </button>
+          <button
+            class="btn btn-primary"
+            style="flex: 1; background-color: #cc0033"
+            onclick="confirmReset()"
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      let selectedNetwork = null;
+      let isHiddenNetwork = false;
+
+      window.addEventListener("load", loadNetworks);
+
+      function loadNetworks() {
+        const btn = document.querySelector(".refresh-btn");
+        btn.classList.add("spinning");
+
+        fetch("/api/scan")
+          .then((r) => r.json())
+          .then((data) => {
+            const list = document.getElementById("network-list");
+            if (data.networks && data.networks.length > 0) {
+              list.innerHTML =
+                data.networks
+                  .map(
+                    (n) => `
+                <div class="network-item" onclick="selectNetwork('${n.ssid}', ${
+                      n.auth
+                    })">
+                  <input type="radio" name="network" ${
+                    selectedNetwork === n.ssid ? "checked" : ""
+                  }>
+                  <span class="network-name">${n.ssid}</span>
+                  <span class="network-signal">${getSignalIcon(n.rssi)} ${
+                      n.auth > 0 ? "🔒" : ""
+                    }</span>
+                </div>
+              `
+                  )
+                  .join("") +
+                `
+                <div class="network-item" onclick="selectHidden()">
+                  <input type="radio" name="network" ${
+                    isHiddenNetwork ? "checked" : ""
+                  }>
+                  <span class="network-name" style="opacity: 0.7;">Hidden Network...</span>
+                </div>
+              `;
+            } else {
+              list.innerHTML =
+                '<div style="padding: 2rem; text-align: center; opacity: 0.5;">No networks found. Click refresh to scan again.</div>';
+            }
+          })
+          .catch((e) => {
+            document.getElementById("network-list").innerHTML =
+              '<div style="padding: 2rem; text-align: center; color: #cc0033;">Error scanning networks</div>';
+          })
+          .finally(() => btn.classList.remove("spinning"));
+      }
+
+      function getSignalIcon(rssi) {
+        if (rssi >= -50) return "▂▄▆█";
+        if (rssi >= -60) return "▂▄▆░";
+        if (rssi >= -70) return "▂▄░░";
+        return "▂░░░";
+      }
+
+      function selectNetwork(ssid, auth) {
+        selectedNetwork = ssid;
+        isHiddenNetwork = false;
+        document.getElementById("hidden-ssid-group").classList.add("hidden");
+        document
+          .getElementById("password-group")
+          .classList.toggle("hidden", auth === 0);
+        document.getElementById("connect-btn").disabled = false;
+        document.getElementById("error-msg").classList.add("hidden");
+
+        document
+          .querySelectorAll(".network-item")
+          .forEach((el) => el.classList.remove("selected"));
+        event.currentTarget.classList.add("selected");
+        event.currentTarget.querySelector("input").checked = true;
+      }
+
+      function selectHidden() {
+        selectedNetwork = null;
+        isHiddenNetwork = true;
+        document.getElementById("hidden-ssid-group").classList.remove("hidden");
+        document.getElementById("password-group").classList.remove("hidden");
+        document.getElementById("connect-btn").disabled = false;
+        document.getElementById("error-msg").classList.add("hidden");
+
+        document
+          .querySelectorAll(".network-item")
+          .forEach((el) => el.classList.remove("selected"));
+        event.currentTarget.classList.add("selected");
+        event.currentTarget.querySelector("input").checked = true;
+      }
+
+      function connect() {
+        const btn = document.getElementById("connect-btn");
+        const errorEl = document.getElementById("error-msg");
+        errorEl.classList.add("hidden");
+
+        const ssid = isHiddenNetwork
+          ? document.getElementById("hidden-ssid").value
+          : selectedNetwork;
+        const password = document.getElementById("password").value;
+
+        if (!ssid) {
+          errorEl.textContent = "Please select or enter a network";
+          errorEl.classList.remove("hidden");
+          return;
+        }
+
+        btn.disabled = true;
+        btn.innerHTML = 'Connecting<span class="loading"></span>';
+
+        fetch("/api/connect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ssid, password }),
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.success) {
+              document.getElementById("setup-card").classList.add("hidden");
+              document
+                .getElementById("success-card")
+                .classList.remove("hidden");
+              document.getElementById("connected-ssid").textContent =
+                "Connected to " + ssid;
+              document.getElementById("claim-code").textContent =
+                data.claim_code || "N/A";
+            } else {
+              errorEl.textContent = data.error || "Failed to connect";
+              errorEl.classList.remove("hidden");
+              btn.disabled = false;
+              btn.textContent = "Connect";
+            }
+          })
+          .catch((e) => {
+            errorEl.textContent = "Connection error. Please try again.";
+            errorEl.classList.remove("hidden");
+            btn.disabled = false;
+            btn.textContent = "Connect";
+          });
+      }
+
+      function factoryReset() {
+        document.getElementById("setup-card").classList.add("hidden");
+        document.getElementById("reset-card").classList.remove("hidden");
+      }
+
+      function cancelReset() {
+        document.getElementById("reset-card").classList.add("hidden");
+        document.getElementById("setup-card").classList.remove("hidden");
+      }
+
+      function confirmReset() {
+        fetch("/api/reset", { method: "POST" })
+          .then(() => {
+            document.getElementById("reset-card").innerHTML =
+              '<div style="text-align: center; padding: 2rem;"><h3 style="color: #b22222;">Reset Complete</h3><p>Device will restart...</p></div>';
+            setTimeout(() => location.reload(), 3000);
+          })
+          .catch(() => {
+            alert("Reset failed. Please try again.");
+          });
+      }
+    </script>
+  </body>
+</html>
