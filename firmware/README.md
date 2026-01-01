@@ -13,7 +13,7 @@ ESP32-C6 firmware for the PressIt streak tracker button.
 
    ```powershell
    cd firmware
-   ~/.platformio/penv/Scripts/pip.exe install cryptography ecdsa bitstring reedsolo
+   ~/.platformio/penv/Scripts/pip.exe install cryptography ecdsa bitstring reedsolo firebase-admin
    ```
 
 2. **Build and upload**:

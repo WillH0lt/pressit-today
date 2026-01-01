@@ -221,6 +221,13 @@ export const buttonPress = onRequest(
 
     const normalizedMac = mac.toUpperCase().trim();
 
+    console.log("Received button press:", {
+      mac: normalizedMac,
+      state,
+      date,
+      timestamp,
+    });
+
     // Look up the device by MAC address
     const devicesRef = db.collection("devices");
     const snapshot = await devicesRef

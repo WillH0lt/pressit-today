@@ -6,7 +6,9 @@
       "Bash(python html_to_header.py:*)",
       "Bash(python -m platformio run:*)",
       "Bash(cmd /c \"pio run\")",
-      "Bash(~/.platformio/penv/Scripts/pio.exe run:*)"
+      "Bash(~/.platformio/penv/Scripts/pio.exe run:*)",
+      "Bash(del:*)",
+      "Bash(dir:*)"
     ],
     "deny": [],
     "ask": []

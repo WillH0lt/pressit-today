@@ -25,6 +25,7 @@
 
 #include "esp_hmac.h"
 #include "esp_efuse.h"
+#include "esp_crt_bundle.h"
 
 #include "lwip/err.h"
 #include "lwip/sys.h"
@@ -35,14 +36,29 @@
 
 static const char *TAG = "streak";
 
+// Button → GPIO23
+
+// 0 → GPIO02
+// 1 → GPIO03
+// 2 → GPIO04
+// 3 → GPIO05
+// 4 → GPIO00
+// 5 → GPIO01
+// 6 → GPIO06
+
 // ============== PIN CONFIGURATION ==============
 // LEDs: index 0 = oldest (left), index 6 = today (right)
-// Note: ESP32-C6 has different GPIO mapping - update these for your board
+// Avoid GPIOs 18-21 because they share the external flash bus on ESP32-C6
 static const gpio_num_t LED_PINS[7] = {
-    GPIO_NUM_0, GPIO_NUM_1, GPIO_NUM_2, GPIO_NUM_3,
-    GPIO_NUM_4, GPIO_NUM_5, GPIO_NUM_6
+    GPIO_NUM_2,
+    GPIO_NUM_3,
+    GPIO_NUM_14,
+    GPIO_NUM_22,
+    GPIO_NUM_19,
+    GPIO_NUM_13,
+    GPIO_NUM_12,
 };
-static const gpio_num_t BUTTON_PIN = GPIO_NUM_7;
+static const gpio_num_t BUTTON_PIN = GPIO_NUM_23;
 // BOOT button on ESP32-C6-DevKitC-1 is GPIO9 - used for factory reset
 static const gpio_num_t BOOT_BUTTON_PIN = GPIO_NUM_9;
 
@@ -51,7 +67,7 @@ static const char *NTP_SERVER = "pool.ntp.org";
 static long gmt_offset_sec = 0;
 
 // ============== WEBHOOK CONFIGURATION ==============
-static const char *WEBHOOK_URL = "https://us-central1-pressit-today.cloudfunctions.net/buttonPress";
+static const char *WEBHOOK_URL = "https://buttonpress-mnouceavfa-uc.a.run.app";
 
 // ============== HMAC CONFIGURATION ==============
 // The HMAC key must be burned to eFuse block KEY4 with purpose HMAC_UP (upstream)
@@ -65,7 +81,7 @@ static bool s_hmac_available = false;
 #define WIFI_MAXIMUM_RETRY 5
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
-#define AP_SSID            "The thing Will gave me"
+#define AP_SSID            "The Thing Will Gave Me"
 
 static EventGroupHandle_t s_wifi_event_group = NULL;
 static int s_retry_num = 0;
@@ -205,18 +221,17 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 // ============== LED FUNCTIONS ==============
 
 static void setup_leds(void) {
-    gpio_config_t io_conf = {
-        .pin_bit_mask = 0,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-
     for (int i = 0; i < 7; i++) {
-        io_conf.pin_bit_mask |= (1ULL << LED_PINS[i]);
+        gpio_config_t io_conf = {
+            .pin_bit_mask = (1ULL << LED_PINS[i]),
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        esp_err_t err = gpio_config(&io_conf);
+        ESP_LOGI(TAG, "Configured GPIO%d as output: %s", LED_PINS[i], esp_err_to_name(err));
     }
-    gpio_config(&io_conf);
 
     for (int i = 0; i < 7; i++) {
         gpio_set_level(LED_PINS[i], 0);
@@ -389,6 +404,9 @@ static void handle_button(void) {
 
 static char tz_response_buffer[128];
 static int tz_response_len = 0;
+
+static char webhook_response_buffer[256];
+static int webhook_response_len = 0;
 
 static esp_err_t tz_http_event_handler(esp_http_client_event_t *evt) {
     switch (evt->event_id) {
@@ -576,6 +594,21 @@ static void save_streak(void) {
 
 // ============== WEBHOOK ==============
 
+static esp_err_t webhook_http_event_handler(esp_http_client_event_t *evt) {
+    switch (evt->event_id) {
+        case HTTP_EVENT_ON_DATA:
+            if (webhook_response_len + evt->data_len < sizeof(webhook_response_buffer) - 1) {
+                memcpy(webhook_response_buffer + webhook_response_len, evt->data, evt->data_len);
+                webhook_response_len += evt->data_len;
+                webhook_response_buffer[webhook_response_len] = '\0';
+            }
+            break;
+        default:
+            break;
+    }
+    return ESP_OK;
+}
+
 static void get_mac_address(char *mac_str, size_t len) {
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -617,9 +650,15 @@ static void send_webhook(bool state) {
 
     ESP_LOGI(TAG, "Sending webhook: %s", payload);
 
+    // Reset response buffer
+    webhook_response_len = 0;
+    webhook_response_buffer[0] = '\0';
+
     esp_http_client_config_t config = {
         .url = WEBHOOK_URL,
         .timeout_ms = 10000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .event_handler = webhook_http_event_handler,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
 
@@ -638,7 +677,11 @@ static void send_webhook(bool state) {
     esp_err_t err = esp_http_client_perform(client);
     if (err == ESP_OK) {
         int status = esp_http_client_get_status_code(client);
-        ESP_LOGI(TAG, "Webhook response: %d", status);
+        if (status >= 200 && status < 300) {
+            ESP_LOGI(TAG, "Webhook response: %d", status);
+        } else {
+            ESP_LOGE(TAG, "Webhook error: %d - %s", status, webhook_response_buffer);
+        }
     } else {
         ESP_LOGE(TAG, "Webhook failed: %s", esp_err_to_name(err));
     }

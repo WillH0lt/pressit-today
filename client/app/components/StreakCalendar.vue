@@ -255,6 +255,14 @@ const monthLabels = computed(() => {
     }
   }
 
+  // Avoid overlapping labels
+  if (
+    labels[0] !== "" &&
+    (labels[1] !== "" || labels[2] !== "" || labels[3] !== "")
+  ) {
+    labels[0] = "";
+  }
+
   return labels;
 });
 

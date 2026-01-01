@@ -9,6 +9,16 @@ export default defineNuxtConfig({
     head: {
       viewport:
         "width=device-width, initial-scale=1.0, interactive-widget=resizes-content",
+      htmlAttrs: {
+        lang: "en",
+      },
+      link: [
+        { rel: "icon", type: "image/x-icon", href: "/favicon.ico" },
+        { rel: "icon", type: "image/png", sizes: "16x16", href: "/favicon-16x16.png" },
+        { rel: "icon", type: "image/png", sizes: "32x32", href: "/favicon-32x32.png" },
+        { rel: "apple-touch-icon", sizes: "180x180", href: "/apple-touch-icon.png" },
+        { rel: "manifest", href: "/site.webmanifest" },
+      ],
     },
   },
   modules: [
@@ -56,7 +66,7 @@ export default defineNuxtConfig({
 
     config: {
       apiKey: "AIzaSyDGoiU6oNsWu552g_uSU9N-Gqcf9m27VkU",
-      authDomain: "pressit-today.firebaseapp.com",
+      authDomain: "thethingwillgaveme.com",
       projectId: "pressit-today",
       storageBucket: "pressit-today.firebasestorage.app",
       messagingSenderId: "1081277700696",
