@@ -68,6 +68,7 @@ static long gmt_offset_sec = 0;
 
 // ============== WEBHOOK CONFIGURATION ==============
 static const char *WEBHOOK_URL = "https://buttonpress-mnouceavfa-uc.a.run.app";
+static const char *TIMEZONE_URL = "https://gettimezone-mnouceavfa-uc.a.run.app";
 
 // ============== HMAC CONFIGURATION ==============
 // The HMAC key must be burned to eFuse block KEY4 with purpose HMAC_UP (upstream)
@@ -91,6 +92,7 @@ static char s_claim_code[12] = {0};
 // ============== STATE ==============
 static uint8_t streak_data = 0;
 static int last_day = -1;
+static int last_tz_refresh_day = -1;  // Track when we last refreshed timezone
 static bool today_state = false;
 static bool button_pressed = false;
 static uint32_t last_debounce_time = 0;
@@ -453,12 +455,29 @@ static void fetch_timezone(void) {
     tz_response_len = 0;
     tz_response_buffer[0] = '\0';
 
+    // Build minimal payload for HMAC signing
+    char payload[64];
+    snprintf(payload, sizeof(payload), "{}");
+
     esp_http_client_config_t config = {
-        .url = "http://ip-api.com/json/?fields=offset",
+        .url = TIMEZONE_URL,
         .timeout_ms = 10000,
         .event_handler = tz_http_event_handler,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
+
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+
+    // Calculate and add HMAC signature if available
+    char signature_hex[65];
+    if (calculate_hmac_signature(payload, strlen(payload), signature_hex)) {
+        esp_http_client_set_header(client, "X-HMAC-Signature", signature_hex);
+        ESP_LOGI(TAG, "Timezone request signed with hardware HMAC");
+    }
+
+    esp_http_client_set_post_field(client, payload, strlen(payload));
 
     esp_err_t err = esp_http_client_perform(client);
     if (err == ESP_OK) {
@@ -564,6 +583,29 @@ static void check_midnight_rollover(void) {
         shift_streak();
         save_streak();
         last_day = current_day;
+    }
+}
+
+// Refresh timezone at 3am daily to handle DST changes
+static void check_timezone_refresh(void) {
+    if (!ntp_synced) return;
+
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    now += gmt_offset_sec;
+    localtime_r(&now, &timeinfo);
+
+    int current_day = timeinfo.tm_yday;
+    int current_hour = timeinfo.tm_hour;
+
+    // Check if it's 3am and we haven't refreshed today
+    if (current_hour == 3 && last_tz_refresh_day != current_day) {
+        ESP_LOGI(TAG, "3am timezone refresh for DST handling...");
+        fetch_timezone();
+        last_tz_refresh_day = current_day;
+        ESP_LOGI(TAG, "Timezone offset now: %ld seconds (UTC%+.1f)",
+                 gmt_offset_sec, gmt_offset_sec / 3600.0);
     }
 }
 
@@ -1366,6 +1408,7 @@ void app_main(void) {
         handle_button();
         check_boot_button();
         check_midnight_rollover();
+        check_timezone_refresh();
 
         // Log local time every 10 seconds
         uint32_t now = millis();

@@ -14,6 +14,10 @@ import type { Request, Response } from "express";
 // Value should be the hex-encoded 32-byte key burned to device eFuse
 const hmacSecret = defineSecret("HMAC_SECRET");
 
+// IPLocate API key for timezone detection
+// Set with: firebase functions:secrets:set IPLOCATE_API_KEY
+const iplocateApiKey = defineSecret("IPLOCATE_API_KEY");
+
 admin.initializeApp();
 
 const db = admin.firestore();
@@ -133,6 +137,62 @@ function verifyHmacSignature(
   }
 }
 
+interface HmacVerificationResult {
+  valid: boolean;
+  error?: string;
+  statusCode?: number;
+}
+
+/**
+ * Verify HMAC signature and timestamp for device requests.
+ * Returns validation result with error details if verification fails.
+ *
+ * @param req - Express request object
+ * @param secret - HMAC secret (hex-encoded)
+ * @param requireTimestamp - Whether to validate timestamp for replay protection
+ */
+function verifyDeviceRequest(
+  req: Request,
+  secret: string,
+  requireTimestamp = true
+): HmacVerificationResult {
+  // Get raw body for signature verification
+  const rawBody =
+    typeof req.body === "string" ? req.body : JSON.stringify(req.body);
+
+  const signature = req.get("X-HMAC-Signature");
+
+  if (!signature) {
+    return { valid: false, error: "Missing HMAC signature", statusCode: 401 };
+  }
+
+  if (!verifyHmacSignature(rawBody, signature, secret)) {
+    return { valid: false, error: "Invalid HMAC signature", statusCode: 401 };
+  }
+
+  // Validate timestamp for replay protection
+  if (requireTimestamp) {
+    const timestamp = req.body?.timestamp;
+
+    if (!timestamp || typeof timestamp !== "number") {
+      return { valid: false, error: "Timestamp is required", statusCode: 400 };
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const drift = Math.abs(now - timestamp);
+
+    if (drift > MAX_TIMESTAMP_DRIFT_SECONDS) {
+      return {
+        valid: false,
+        error: `Request expired (drift: ${drift}s)`,
+        statusCode: 401,
+      };
+    }
+  }
+
+  return { valid: true };
+}
+
 /**
  * HTTP endpoint to receive button presses from devices.
  *
@@ -158,47 +218,17 @@ export const buttonPress = onRequest(
       return;
     }
 
-    // Get raw body for signature verification
-    const rawBody =
-      typeof req.body === "string" ? req.body : JSON.stringify(req.body);
-
-    // Verify HMAC signature if secret is configured
+    // Verify HMAC signature and timestamp if secret is configured
     const secret = hmacSecret.value();
     if (secret) {
-      const signature = req.get("X-HMAC-Signature");
-
-      if (!signature) {
-        res.status(401).json({ error: "Missing HMAC signature" });
-        return;
-      }
-
-      if (!verifyHmacSignature(rawBody, signature, secret)) {
-        res.status(401).json({ error: "Invalid HMAC signature" });
+      const verification = verifyDeviceRequest(req, secret, true);
+      if (!verification.valid) {
+        res.status(verification.statusCode!).json({ error: verification.error });
         return;
       }
     }
 
-    const { mac, state, date, timestamp, time } = req.body as ButtonPressData;
-
-    // Validate timestamp for replay protection (only if HMAC is enabled)
-    if (secret) {
-      if (!timestamp || typeof timestamp !== "number") {
-        res.status(400).json({ error: "Timestamp is required" });
-        return;
-      }
-
-      const now = Math.floor(Date.now() / 1000);
-      const drift = Math.abs(now - timestamp);
-
-      if (drift > MAX_TIMESTAMP_DRIFT_SECONDS) {
-        res.status(401).json({
-          error: "Request expired",
-          serverTime: now,
-          requestTime: timestamp,
-        });
-        return;
-      }
-    }
+    const { mac, state, date, time } = req.body as ButtonPressData;
 
     // Validate input
     if (!mac || typeof mac !== "string") {
@@ -236,7 +266,6 @@ export const buttonPress = onRequest(
       state,
       date,
       time,
-      timestamp,
     });
 
     // Look up the device by MAC address
@@ -406,3 +435,96 @@ export const deleteAccount = onCall(async (request: CallableRequest) => {
     message: "Account deleted successfully",
   };
 });
+
+/**
+ * HTTP endpoint to get timezone offset from client IP address.
+ *
+ * Uses IPLocate API to determine timezone from the requesting IP.
+ * Returns the timezone offset in seconds from UTC.
+ * Requires HMAC signature for device authentication.
+ *
+ * Response format: { "offset": -25200 }
+ */
+export const getTimezone = onRequest(
+  { secrets: [iplocateApiKey, hmacSecret] },
+  async (req: Request, res: Response) => {
+    // Verify HMAC signature if secret is configured
+    const secret = hmacSecret.value();
+    if (secret) {
+      const verification = verifyDeviceRequest(req, secret, false);
+      if (!verification.valid) {
+        res.status(verification.statusCode!).json({ error: verification.error });
+        return;
+      }
+    }
+
+    // Get client IP from request
+    // Cloud Functions provides the client IP in x-forwarded-for header
+    const forwardedFor = req.get("x-forwarded-for");
+    const clientIp = forwardedFor
+      ? forwardedFor.split(",")[0].trim()
+      : req.ip || "";
+
+    if (!clientIp) {
+      res.status(400).json({ error: "Could not determine client IP" });
+      return;
+    }
+
+    const apiKey = iplocateApiKey.value();
+    if (!apiKey) {
+      console.error("IPLOCATE_API_KEY secret not configured");
+      res.status(500).json({ error: "Service not configured" });
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `https://iplocate.io/api/lookup/${clientIp}?apikey=${apiKey}`
+      );
+
+      if (!response.ok) {
+        console.error(`IPLocate API error: ${response.status}`);
+        res.status(502).json({ error: "Timezone lookup failed" });
+        return;
+      }
+
+      const data = await response.json();
+
+      if (!data.time_zone) {
+        console.error("No timezone in IPLocate response:", data);
+        res.status(502).json({ error: "Timezone not found" });
+        return;
+      }
+
+      // Convert IANA timezone to offset in seconds
+      const now = new Date();
+      const formatter = new Intl.DateTimeFormat("en-US", {
+        timeZone: data.time_zone,
+        timeZoneName: "shortOffset",
+      });
+      const parts = formatter.formatToParts(now);
+      const offsetPart = parts.find((p) => p.type === "timeZoneName");
+
+      let offsetSeconds = 0;
+      if (offsetPart) {
+        // Parse offset like "GMT-7" or "GMT+5:30"
+        const match = offsetPart.value.match(/GMT([+-])?(\d+)(?::(\d+))?/);
+        if (match) {
+          const sign = match[1] === "-" ? -1 : 1;
+          const hours = parseInt(match[2], 10);
+          const minutes = match[3] ? parseInt(match[3], 10) : 0;
+          offsetSeconds = sign * (hours * 3600 + minutes * 60);
+        }
+      }
+
+      console.log(
+        `Timezone lookup for ${clientIp}: ${data.time_zone} (offset: ${offsetSeconds}s)`
+      );
+
+      res.status(200).json({ offset: offsetSeconds });
+    } catch (error) {
+      console.error("Timezone lookup error:", error);
+      res.status(500).json({ error: "Internal error" });
+    }
+  }
+);
