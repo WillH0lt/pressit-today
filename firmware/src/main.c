@@ -101,8 +101,9 @@ static bool s_netif_initialized = false;
 
 // Animation state
 static int animation_index = 0;
-static uint32_t last_animation_time = 0;
 static const uint32_t ANIMATION_INTERVAL = 100;
+static TaskHandle_t s_animation_task = NULL;
+static volatile bool s_animation_running = false;
 
 // HTTP Server handle
 static httpd_handle_t s_httpd = NULL;
@@ -114,7 +115,8 @@ static TaskHandle_t s_dns_task = NULL;
 // ============== FUNCTION DECLARATIONS ==============
 static void setup_leds(void);
 static void update_leds(void);
-static void animate_leds(void);
+static void start_led_animation(void);
+static void stop_led_animation(void);
 static void handle_button(void);
 static void check_midnight_rollover(void);
 static void shift_streak(void);
@@ -245,11 +247,8 @@ static void update_leds(void) {
     }
 }
 
-static void animate_leds(void) {
-    uint32_t now = millis();
-    if (now - last_animation_time >= ANIMATION_INTERVAL) {
-        last_animation_time = now;
-
+static void animation_task(void *pvParameters) {
+    while (s_animation_running) {
         for (int i = 0; i < 7; i++) {
             gpio_set_level(LED_PINS[i], 0);
         }
@@ -264,6 +263,31 @@ static void animate_leds(void) {
 
         gpio_set_level(LED_PINS[led_index], 1);
         animation_index++;
+
+        vTaskDelay(pdMS_TO_TICKS(ANIMATION_INTERVAL));
+    }
+
+    // Turn off all LEDs when stopping
+    for (int i = 0; i < 7; i++) {
+        gpio_set_level(LED_PINS[i], 0);
+    }
+
+    s_animation_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static void start_led_animation(void) {
+    if (s_animation_task != NULL) return;
+    animation_index = 0;
+    s_animation_running = true;
+    xTaskCreate(animation_task, "led_anim", 2048, NULL, 5, &s_animation_task);
+}
+
+static void stop_led_animation(void) {
+    s_animation_running = false;
+    // Wait for task to finish
+    while (s_animation_task != NULL) {
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -1169,8 +1193,7 @@ static void start_provisioning_mode(void) {
 
     // Wait for provisioning to complete
     while (!s_provisioning_done) {
-        animate_leds();
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     ESP_LOGI(TAG, "Provisioning complete!");
@@ -1184,11 +1207,6 @@ static void start_provisioning_mode(void) {
 
     // Switch to STA only mode
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-
-    // Turn off animation LEDs
-    for (int i = 0; i < 7; i++) {
-        gpio_set_level(LED_PINS[i], 0);
-    }
 }
 
 static bool connect_with_saved_credentials(void) {
@@ -1247,28 +1265,11 @@ static bool connect_with_saved_credentials(void) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    // Animate LEDs while connecting
-    uint32_t start_time = millis();
-    const uint32_t timeout = 15000;
-
-    while ((millis() - start_time) < timeout) {
-        animate_leds();
-
-        EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                               WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                               pdFALSE, pdFALSE,
-                                               pdMS_TO_TICKS(100));
-        if (bits & (WIFI_CONNECTED_BIT | WIFI_FAIL_BIT)) {
-            break;
-        }
-    }
-
-    // Turn off animation LEDs
-    for (int i = 0; i < 7; i++) {
-        gpio_set_level(LED_PINS[i], 0);
-    }
-
-    EventBits_t bits = xEventGroupGetBits(s_wifi_event_group);
+    // Wait for connection
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE, pdFALSE,
+                                           pdMS_TO_TICKS(15000));
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "Connected to %s", ssid);
         return true;
@@ -1318,9 +1319,11 @@ void app_main(void) {
     setup_button();
     setup_boot_button();
 
+    // Start LED animation during startup
+    start_led_animation();
+
     // Load saved streak data
     load_streak();
-    update_leds();
 
     // Try to connect with saved WiFi credentials
     if (connect_with_saved_credentials()) {
@@ -1330,11 +1333,12 @@ void app_main(void) {
         start_provisioning_mode();
     }
 
-    // Restore streak LEDs after WiFi setup
-    update_leds();
-
     // Sync time
     sync_ntp();
+
+    // Stop animation and restore streak LEDs before main loop
+    stop_led_animation();
+    update_leds();
 
     // Main loop
     uint32_t last_time_log = 0;
