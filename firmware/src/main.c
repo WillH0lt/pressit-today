@@ -650,6 +650,24 @@ static void get_current_date(char *date_str, size_t len) {
              timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday);
 }
 
+static void get_current_time_str(char *time_str, size_t len) {
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    now += gmt_offset_sec;
+    localtime_r(&now, &timeinfo);
+
+    int hour = timeinfo.tm_hour;
+    const char *ampm = "AM";
+    if (hour >= 12) {
+        ampm = "PM";
+        if (hour > 12) hour -= 12;
+    }
+    if (hour == 0) hour = 12;
+
+    snprintf(time_str, len, "%d:%02d %s", hour, timeinfo.tm_min, ampm);
+}
+
 static void send_webhook(bool state) {
     wifi_ap_record_t ap_info;
     if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) {
@@ -659,18 +677,20 @@ static void send_webhook(bool state) {
 
     char mac_str[18];
     char date_str[11];
+    char time_str[12];
     get_mac_address(mac_str, sizeof(mac_str));
     get_current_date(date_str, sizeof(date_str));
+    get_current_time_str(time_str, sizeof(time_str));
 
     // Get Unix timestamp for replay protection
     time_t now;
     time(&now);
 
-    // Build payload with timestamp
+    // Build payload with timestamp and local time
     char payload[256];
     snprintf(payload, sizeof(payload),
-             "{\"mac\":\"%s\",\"state\":%s,\"date\":\"%s\",\"timestamp\":%lld}",
-             mac_str, state ? "true" : "false", date_str, (long long)now);
+             "{\"mac\":\"%s\",\"state\":%s,\"date\":\"%s\",\"timestamp\":%lld,\"time\":\"%s\"}",
+             mac_str, state ? "true" : "false", date_str, (long long)now, time_str);
 
     ESP_LOGI(TAG, "Sending webhook: %s", payload);
 

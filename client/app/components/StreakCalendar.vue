@@ -118,15 +118,14 @@ const pressSet = computed(() => {
   return set;
 });
 
-// Map of date keys to press times for tooltip display
+// Map of date keys to local time strings for tooltip display
 const pressTimeMap = computed(() => {
-  const map = new Map<string, Date>();
+  const map = new Map<string, string>();
   for (const press of props.presses) {
-    const pressDate = press.pressedAt.toDate();
-    const key = formatDateKey(pressDate);
+    const key = press.date;
     // Store the first press time for each day
     if (!map.has(key)) {
-      map.set(key, pressDate);
+      map.set(key, press.time);
     }
   }
   return map;
@@ -137,7 +136,7 @@ const earliestYear = computed(() => {
   if (props.presses.length === 0) return currentYear;
   let min = currentYear;
   for (const press of props.presses) {
-    const year = press.pressedAt.toDate().getFullYear();
+    const year = parseInt(press.date.split("-")[0]!, 10);
     if (year < min) min = year;
   }
   return min;
@@ -290,12 +289,8 @@ function formatTooltip(day: CalendarDay): string {
   });
 
   if (day.hasPress) {
-    const pressTime = pressTimeMap.value.get(formatDateKey(day.date));
-    if (pressTime) {
-      const timeStr = pressTime.toLocaleTimeString("en-US", {
-        hour: "numeric",
-        minute: "2-digit",
-      });
+    const timeStr = pressTimeMap.value.get(formatDateKey(day.date));
+    if (timeStr) {
       return `${dateStr} at ${timeStr}`;
     }
   }

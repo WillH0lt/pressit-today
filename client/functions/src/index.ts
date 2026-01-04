@@ -100,6 +100,7 @@ interface ButtonPressData {
   state: boolean;
   date: string; // YYYY-MM-DD in device's local time
   timestamp: number; // Unix timestamp for replay protection
+  time: string; // Local time when button was pressed (e.g., "6:41 AM")
 }
 
 // Maximum allowed time difference for replay protection (5 minutes)
@@ -177,7 +178,7 @@ export const buttonPress = onRequest(
       }
     }
 
-    const { mac, state, date, timestamp } = req.body as ButtonPressData;
+    const { mac, state, date, timestamp, time } = req.body as ButtonPressData;
 
     // Validate timestamp for replay protection (only if HMAC is enabled)
     if (secret) {
@@ -219,12 +220,22 @@ export const buttonPress = onRequest(
       return;
     }
 
+    if (
+      !time ||
+      typeof time !== "string" ||
+      !/^\d{1,2}:\d{2} (AM|PM)$/.test(time)
+    ) {
+      res.status(400).json({ error: "Time must be in H:MM AM/PM format" });
+      return;
+    }
+
     const normalizedMac = mac.toUpperCase().trim();
 
     console.log("Received button press:", {
       mac: normalizedMac,
       state,
       date,
+      time,
       timestamp,
     });
 
@@ -253,6 +264,7 @@ export const buttonPress = onRequest(
       // Save the button press
       await pressRef.set({
         date,
+        time,
         pressedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 

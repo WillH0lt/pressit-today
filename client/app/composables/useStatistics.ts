@@ -216,12 +216,21 @@ export const useStatistics = (
   });
 
   const avgTimeOfDay = computed(() => {
+    // Parse local time strings (e.g., "6:41 AM") into minutes since midnight
     const times = presses.value
-      .filter((p) => p.pressedAt)
+      .filter((p) => p.time)
       .map((p) => {
-        const date = p.pressedAt.toDate();
-        return date.getHours() * 60 + date.getMinutes();
-      });
+        const match = p.time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+        if (!match) return null;
+        let hours = parseInt(match[1]!, 10);
+        const minutes = parseInt(match[2]!, 10);
+        const period = match[3]!.toUpperCase();
+        // Convert to 24-hour format
+        if (period === "PM" && hours !== 12) hours += 12;
+        if (period === "AM" && hours === 12) hours = 0;
+        return hours * 60 + minutes;
+      })
+      .filter((t): t is number => t !== null);
 
     if (!times.length) return "-";
 

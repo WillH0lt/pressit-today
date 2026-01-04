@@ -3,9 +3,17 @@ import { ref } from "vue";
 import type { Press } from "~/types";
 import { useStatistics } from "~/composables/useStatistics";
 
+// Helper to format time as "H:MM AM/PM"
+const formatTime = (hour: number, minute: number): string => {
+  const period = hour >= 12 ? "PM" : "AM";
+  const displayHour = hour % 12 || 12;
+  return `${displayHour}:${minute.toString().padStart(2, "0")} ${period}`;
+};
+
 // Helper to create a mock Press object
 const createPress = (date: string, hour = 9, minute = 0): Press => ({
   date,
+  time: formatTime(hour, minute),
   pressedAt: {
     toDate: () => new Date(`${date}T${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}:00`),
   } as any,
