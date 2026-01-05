@@ -1403,26 +1403,11 @@ void app_main(void) {
     update_leds();
 
     // Main loop
-    uint32_t last_time_log = 0;
     while (true) {
         handle_button();
         check_boot_button();
         check_midnight_rollover();
         check_timezone_refresh();
-
-        // Log local time every 10 seconds
-        uint32_t now = millis();
-        if (now - last_time_log >= 10000) {
-            last_time_log = now;
-            time_t t = time(NULL);
-            t += gmt_offset_sec;  // Apply timezone offset
-            struct tm timeinfo;
-            localtime_r(&t, &timeinfo);
-            ESP_LOGI(TAG, "Local time: %04d-%02d-%02d %02d:%02d:%02d (UTC%+.1f)",
-                     timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-                     timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
-                     gmt_offset_sec / 3600.0);
-        }
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
