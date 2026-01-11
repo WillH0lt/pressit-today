@@ -493,7 +493,8 @@ static void fetch_timezone(void) {
             }
         }
     } else {
-        ESP_LOGW(TAG, "Timezone detection failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "Timezone detection failed: %s - using saved offset %ld (UTC%+.1f)",
+                 esp_err_to_name(err), gmt_offset_sec, gmt_offset_sec / 3600.0);
     }
     esp_http_client_cleanup(client);
 }
@@ -518,12 +519,12 @@ static void sync_ntp(void) {
 
     // Wait for sync using our callback flag
     int attempts = 0;
-    while (!ntp_synced && attempts < 30) {
+    while (!ntp_synced && attempts < 60) {
         vTaskDelay(pdMS_TO_TICKS(1000));
 
         // Check SNTP status for debugging
         sntp_sync_status_t status = sntp_get_sync_status();
-        ESP_LOGI(TAG, "Waiting for NTP sync... (status: %d, attempt %d/30)", status, attempts + 1);
+        ESP_LOGI(TAG, "Waiting for NTP sync... (status: %d, attempt %d/60)", status, attempts + 1);
         attempts++;
     }
 
@@ -537,27 +538,42 @@ static void sync_ntp(void) {
         now += gmt_offset_sec;
         localtime_r(&now, &timeinfo);
 
-        last_day = timeinfo.tm_yday;
-        ESP_LOGI(TAG, "Time synced! Current time: %02d:%02d:%02d",
-                 timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+        // Use epoch days (days since Unix epoch) for simple date math
+        int32_t current_epoch_day = (int32_t)(now / 86400);
+
+        ESP_LOGI(TAG, "Time synced! Current time: %02d:%02d:%02d (epoch day %ld)",
+                 timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, (long)current_epoch_day);
 
         nvs_handle_t nvs;
+        int32_t saved_epoch_day = -1;
         if (nvs_open("streak", NVS_READONLY, &nvs) == ESP_OK) {
-            int32_t saved_day = -1;
-            nvs_get_i32(nvs, "lastDay", &saved_day);
+            nvs_get_i32(nvs, "epochDay", &saved_epoch_day);
             nvs_close(nvs);
+        }
 
-            if (saved_day != -1 && saved_day != last_day) {
-                int days_passed = last_day - saved_day;
-                if (days_passed < 0) days_passed += 365;
+        ESP_LOGI(TAG, "Day comparison: saved=%ld, current=%ld, last_day=%d",
+                 (long)saved_epoch_day, (long)current_epoch_day, last_day);
 
-                ESP_LOGI(TAG, "Days since last use: %d", days_passed);
+        // Calculate days passed - simple subtraction with epoch days
+        if (saved_epoch_day != -1 && saved_epoch_day != current_epoch_day) {
+            int days_passed = current_epoch_day - saved_epoch_day;
+            ESP_LOGI(TAG, "Days passed calculation: %d", days_passed);
+
+            if (days_passed > 0) {
+                ESP_LOGI(TAG, "Shifting %d times...", days_passed > 7 ? 7 : days_passed);
                 for (int i = 0; i < days_passed && i < 7; i++) {
+                    ESP_LOGI(TAG, "Shift %d of %d", i + 1, days_passed > 7 ? 7 : days_passed);
                     shift_streak();
                 }
-                save_streak();
             }
+        } else {
+            ESP_LOGI(TAG, "No shift needed (saved=%ld, current=%ld)",
+                     (long)saved_epoch_day, (long)current_epoch_day);
         }
+
+        // Always save current epoch day after NTP sync
+        last_day = current_epoch_day;
+        save_streak();
     } else {
         ESP_LOGW(TAG, "Failed to sync time - using saved state");
     }
@@ -565,11 +581,9 @@ static void sync_ntp(void) {
 
 static int get_current_day(void) {
     time_t now;
-    struct tm timeinfo;
     time(&now);
     now += gmt_offset_sec;
-    localtime_r(&now, &timeinfo);
-    return timeinfo.tm_yday;
+    return (int)(now / 86400);  // epoch day
 }
 
 static void check_midnight_rollover(void) {
@@ -579,9 +593,19 @@ static void check_midnight_rollover(void) {
     if (current_day == -1) return;
 
     if (last_day != -1 && current_day != last_day) {
-        ESP_LOGI(TAG, "Midnight! Shifting streak...");
-        shift_streak();
-        save_streak();
+        int days_passed = current_day - last_day;
+
+        // Only shift forward, ignore backward time changes
+        if (days_passed > 0) {
+            ESP_LOGI(TAG, "Day rollover! last_day=%d, current_day=%d, days_passed=%d",
+                     last_day, current_day, days_passed);
+
+            for (int i = 0; i < days_passed && i < 7; i++) {
+                shift_streak();
+            }
+            update_leds();
+            save_streak();
+        }
         last_day = current_day;
     }
 }
@@ -613,7 +637,6 @@ static void shift_streak(void) {
     streak_data = streak_data >> 1;
     streak_data &= ~(1 << 6);
     today_state = false;
-    update_leds();
 
     ESP_LOGI(TAG, "Streak after shift: %d%d%d%d%d%d%d",
              (streak_data >> 6) & 1, (streak_data >> 5) & 1,
@@ -629,12 +652,15 @@ static void load_streak(void) {
     if (nvs_open("streak", NVS_READONLY, &nvs) == ESP_OK) {
         uint8_t data = 0;
         int32_t day = -1;
+        int32_t tz_offset = 0;
         nvs_get_u8(nvs, "data", &data);
-        nvs_get_i32(nvs, "lastDay", &day);
+        nvs_get_i32(nvs, "epochDay", &day);
+        nvs_get_i32(nvs, "tzOffset", &tz_offset);
         nvs_close(nvs);
 
         streak_data = data;
         last_day = day;
+        gmt_offset_sec = tz_offset;  // Restore last known timezone
     }
 
     today_state = (streak_data >> 6) & 1;
@@ -651,7 +677,8 @@ static void save_streak(void) {
     if (nvs_open("streak", NVS_READWRITE, &nvs) == ESP_OK) {
         nvs_set_u8(nvs, "data", streak_data);
         if (last_day != -1) {
-            nvs_set_i32(nvs, "lastDay", last_day);
+            nvs_set_i32(nvs, "epochDay", last_day);
+            nvs_set_i32(nvs, "tzOffset", gmt_offset_sec);
         }
         nvs_commit(nvs);
         nvs_close(nvs);
