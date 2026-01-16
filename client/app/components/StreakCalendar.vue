@@ -51,8 +51,8 @@
               :disabled="!isDayVisible(day)"
             >
               <div
-                class="w-3 h-3 rounded-sm transition-colors duration-100"
-                :class="getCellClass(day)"
+                class="w-3 h-3 rounded-sm transition-colors duration-300 cursor-pointer"
+                :style="getCellStyle(day)"
               ></div>
             </UTooltip>
           </template>
@@ -87,7 +87,23 @@ function scrollToEnd() {
   });
 }
 
-onMounted(scrollToEnd);
+onMounted(() => {
+  scrollToEnd();
+});
+
+function getCellStyle(day: CalendarDay): Record<string, string> {
+  if (!isDayVisible(day)) {
+    return { backgroundColor: "transparent" };
+  }
+
+  const backgroundColor = day.hasPress
+    ? "var(--color-primary)"
+    : "var(--color-gray-600)";
+
+  return {
+    backgroundColor: backgroundColor,
+  };
+}
 
 const today = new Date();
 today.setHours(23, 59, 59, 999);
@@ -106,7 +122,7 @@ watch(selectedYear, () => {
 function formatDateKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
     2,
-    "0"
+    "0",
   )}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
@@ -296,13 +312,5 @@ function formatTooltip(day: CalendarDay): string {
   }
 
   return dateStr;
-}
-
-function getCellClass(day: CalendarDay): string {
-  if (!isDayVisible(day)) return "bg-transparent";
-
-  if (day.hasPress) return "bg-primary cursor-pointer hover:bg-primary-light";
-
-  return "bg-gray-600 cursor-pointer hover:bg-gray-500";
 }
 </script>

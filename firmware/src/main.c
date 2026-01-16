@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 
 #include "esp_system.h"
 #include "esp_wifi.h"
@@ -52,11 +53,11 @@ static const char *TAG = "streak";
 static const gpio_num_t LED_PINS[7] = {
     GPIO_NUM_2,
     GPIO_NUM_3,
-    GPIO_NUM_14,
     GPIO_NUM_22,
     GPIO_NUM_19,
     GPIO_NUM_13,
     GPIO_NUM_12,
+    GPIO_NUM_14,
 };
 static const gpio_num_t BUTTON_PIN = GPIO_NUM_23;
 // BOOT button on ESP32-C6-DevKitC-1 is GPIO9 - used for factory reset
@@ -90,12 +91,11 @@ static bool s_provisioning_done = false;
 static char s_claim_code[12] = {0};
 
 // ============== STATE ==============
-static uint8_t streak_data = 0;
-static int last_day = -1;
+static int32_t press_days[7] = {0};  // Epoch days when button was pressed
+static int press_days_count = 0;
+static int32_t last_checked_day = -1;  // Track current day for midnight rollover
 static int last_tz_refresh_day = -1;  // Track when we last refreshed timezone
-static bool today_state = false;
 static bool button_pressed = false;
-static uint32_t last_debounce_time = 0;
 static const uint32_t DEBOUNCE_DELAY = 50;
 static bool last_button_state = true;
 static bool ntp_synced = false;
@@ -113,6 +113,10 @@ static httpd_handle_t s_httpd = NULL;
 // DNS task handle
 static TaskHandle_t s_dns_task = NULL;
 
+// Webhook task state
+static TaskHandle_t s_webhook_task = NULL;
+static QueueHandle_t s_webhook_queue = NULL;
+
 
 // ============== FUNCTION DECLARATIONS ==============
 static void setup_leds(void);
@@ -121,12 +125,14 @@ static void start_led_animation(void);
 static void stop_led_animation(void);
 static void handle_button(void);
 static void check_midnight_rollover(void);
-static void shift_streak(void);
 static void save_streak(void);
 static void load_streak(void);
+static void prune_press_days(int32_t today);
 static void sync_ntp(void);
 static int get_current_day(void);
+static void send_webhook_internal(bool state);
 static void send_webhook(bool state);
+static void webhook_task(void *pvParameters);
 static void get_mac_address(char *mac_str, size_t len);
 static void get_current_date(char *date_str, size_t len);
 static void generate_claim_code(char *code, size_t len);
@@ -242,9 +248,20 @@ static void setup_leds(void) {
     }
 }
 
+// Check if a given epoch day is in the press_days list
+static bool is_day_pressed(int32_t day) {
+    for (int i = 0; i < press_days_count; i++) {
+        if (press_days[i] == day) return true;
+    }
+    return false;
+}
+
 static void update_leds(void) {
+    int32_t today = get_current_day();
     for (int i = 0; i < 7; i++) {
-        bool state = (streak_data >> i) & 1;
+        // LED 0 = 6 days ago, LED 6 = today
+        int32_t day_for_led = today - (6 - i);
+        bool state = is_day_pressed(day_for_led);
         gpio_set_level(LED_PINS[i], state ? 1 : 0);
     }
 }
@@ -394,30 +411,36 @@ static void handle_button(void) {
     bool reading = gpio_get_level(BUTTON_PIN);
 
     if (reading != last_button_state) {
-        last_debounce_time = millis();
-    }
-
-    if ((millis() - last_debounce_time) > DEBOUNCE_DELAY) {
         if (reading == 0 && !button_pressed) {
             button_pressed = true;
-            today_state = !today_state;
+            int32_t today = get_current_day();
+            bool was_pressed = is_day_pressed(today);
 
-            if (today_state) {
-                streak_data |= (1 << 6);
+            if (was_pressed) {
+                // Remove today from press_days
+                for (int i = 0; i < press_days_count; i++) {
+                    if (press_days[i] == today) {
+                        for (int j = i; j < press_days_count - 1; j++) {
+                            press_days[j] = press_days[j + 1];
+                        }
+                        press_days_count--;
+                        break;
+                    }
+                }
             } else {
-                streak_data &= ~(1 << 6);
+                // Add today to press_days
+                if (press_days_count < 7) {
+                    press_days[press_days_count++] = today;
+                }
             }
 
+            bool now_pressed = !was_pressed;
             update_leds();
             save_streak();
-            send_webhook(today_state);
+            send_webhook(now_pressed);
 
-            ESP_LOGI(TAG, "Today toggled: %s | Streak: %d%d%d%d%d%d%d",
-                     today_state ? "ON" : "OFF",
-                     (streak_data >> 6) & 1, (streak_data >> 5) & 1,
-                     (streak_data >> 4) & 1, (streak_data >> 3) & 1,
-                     (streak_data >> 2) & 1, (streak_data >> 1) & 1,
-                     streak_data & 1);
+            ESP_LOGI(TAG, "Today toggled: %s (press_days_count=%d)",
+                     now_pressed ? "ON" : "OFF", press_days_count);
         } else if (reading == 1) {
             button_pressed = false;
         }
@@ -519,12 +542,12 @@ static void sync_ntp(void) {
 
     // Wait for sync using our callback flag
     int attempts = 0;
-    while (!ntp_synced && attempts < 60) {
+    while (!ntp_synced && attempts < 120) {
         vTaskDelay(pdMS_TO_TICKS(1000));
 
         // Check SNTP status for debugging
         sntp_sync_status_t status = sntp_get_sync_status();
-        ESP_LOGI(TAG, "Waiting for NTP sync... (status: %d, attempt %d/60)", status, attempts + 1);
+        ESP_LOGI(TAG, "Waiting for NTP sync... (status: %d, attempt %d/120)", status, attempts + 1);
         attempts++;
     }
 
@@ -544,35 +567,9 @@ static void sync_ntp(void) {
         ESP_LOGI(TAG, "Time synced! Current time: %02d:%02d:%02d (epoch day %ld)",
                  timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, (long)current_epoch_day);
 
-        nvs_handle_t nvs;
-        int32_t saved_epoch_day = -1;
-        if (nvs_open("streak", NVS_READONLY, &nvs) == ESP_OK) {
-            nvs_get_i32(nvs, "epochDay", &saved_epoch_day);
-            nvs_close(nvs);
-        }
-
-        ESP_LOGI(TAG, "Day comparison: saved=%ld, current=%ld, last_day=%d",
-                 (long)saved_epoch_day, (long)current_epoch_day, last_day);
-
-        // Calculate days passed - simple subtraction with epoch days
-        if (saved_epoch_day != -1 && saved_epoch_day != current_epoch_day) {
-            int days_passed = current_epoch_day - saved_epoch_day;
-            ESP_LOGI(TAG, "Days passed calculation: %d", days_passed);
-
-            if (days_passed > 0) {
-                ESP_LOGI(TAG, "Shifting %d times...", days_passed > 7 ? 7 : days_passed);
-                for (int i = 0; i < days_passed && i < 7; i++) {
-                    ESP_LOGI(TAG, "Shift %d of %d", i + 1, days_passed > 7 ? 7 : days_passed);
-                    shift_streak();
-                }
-            }
-        } else {
-            ESP_LOGI(TAG, "No shift needed (saved=%ld, current=%ld)",
-                     (long)saved_epoch_day, (long)current_epoch_day);
-        }
-
-        // Always save current epoch day after NTP sync
-        last_day = current_epoch_day;
+        // Prune old days
+        prune_press_days(current_epoch_day);
+        last_checked_day = current_epoch_day;
         save_streak();
     } else {
         ESP_LOGW(TAG, "Failed to sync time - using saved state");
@@ -589,25 +586,18 @@ static int get_current_day(void) {
 static void check_midnight_rollover(void) {
     if (!ntp_synced) return;
 
-    int current_day = get_current_day();
-    if (current_day == -1) return;
+    int32_t current_day = get_current_day();
 
-    if (last_day != -1 && current_day != last_day) {
-        int days_passed = current_day - last_day;
+    if (last_checked_day != -1 && current_day != last_checked_day) {
+        ESP_LOGI(TAG, "Day rollover! last_checked=%ld, current=%ld",
+                 (long)last_checked_day, (long)current_day);
 
-        // Only shift forward, ignore backward time changes
-        if (days_passed > 0) {
-            ESP_LOGI(TAG, "Day rollover! last_day=%d, current_day=%d, days_passed=%d",
-                     last_day, current_day, days_passed);
-
-            for (int i = 0; i < days_passed && i < 7; i++) {
-                shift_streak();
-            }
-            update_leds();
-            save_streak();
-        }
-        last_day = current_day;
+        // Prune old days for the new day
+        prune_press_days(current_day);
+        update_leds();
+        save_streak();
     }
+    last_checked_day = current_day;
 }
 
 // Refresh timezone at 3am daily to handle DST changes
@@ -633,52 +623,53 @@ static void check_timezone_refresh(void) {
     }
 }
 
-static void shift_streak(void) {
-    streak_data = streak_data >> 1;
-    streak_data &= ~(1 << 6);
-    today_state = false;
-
-    ESP_LOGI(TAG, "Streak after shift: %d%d%d%d%d%d%d",
-             (streak_data >> 6) & 1, (streak_data >> 5) & 1,
-             (streak_data >> 4) & 1, (streak_data >> 3) & 1,
-             (streak_data >> 2) & 1, (streak_data >> 1) & 1,
-             streak_data & 1);
-}
-
 // ============== PERSISTENCE ==============
 
 static void load_streak(void) {
     nvs_handle_t nvs;
     if (nvs_open("streak", NVS_READONLY, &nvs) == ESP_OK) {
-        uint8_t data = 0;
-        int32_t day = -1;
         int32_t tz_offset = 0;
-        nvs_get_u8(nvs, "data", &data);
-        nvs_get_i32(nvs, "epochDay", &day);
         nvs_get_i32(nvs, "tzOffset", &tz_offset);
-        nvs_close(nvs);
-
-        streak_data = data;
-        last_day = day;
         gmt_offset_sec = tz_offset;  // Restore last known timezone
+
+        // Load press days list
+        size_t size = sizeof(press_days);
+        if (nvs_get_blob(nvs, "pressDays", press_days, &size) == ESP_OK) {
+            press_days_count = size / sizeof(int32_t);
+        } else {
+            press_days_count = 0;
+        }
+        nvs_close(nvs);
     }
 
-    today_state = (streak_data >> 6) & 1;
+    ESP_LOGI(TAG, "Loaded %d press days, tzOffset=%ld", press_days_count, gmt_offset_sec);
+}
 
-    ESP_LOGI(TAG, "Loaded streak: %d%d%d%d%d%d%d",
-             (streak_data >> 6) & 1, (streak_data >> 5) & 1,
-             (streak_data >> 4) & 1, (streak_data >> 3) & 1,
-             (streak_data >> 2) & 1, (streak_data >> 1) & 1,
-             streak_data & 1);
+// Prune old days from press_days (more than 6 days ago)
+static void prune_press_days(int32_t today) {
+    int new_count = 0;
+    for (int i = 0; i < press_days_count; i++) {
+        int days_ago = today - press_days[i];
+        if (days_ago >= 0 && days_ago < 7) {
+            press_days[new_count++] = press_days[i];
+        }
+    }
+    press_days_count = new_count;
+
+    ESP_LOGI(TAG, "Pruned press_days for day %ld: %d days stored, today=%s",
+             (long)today, press_days_count, is_day_pressed(today) ? "ON" : "OFF");
 }
 
 static void save_streak(void) {
     nvs_handle_t nvs;
     if (nvs_open("streak", NVS_READWRITE, &nvs) == ESP_OK) {
-        nvs_set_u8(nvs, "data", streak_data);
-        if (last_day != -1) {
-            nvs_set_i32(nvs, "epochDay", last_day);
-            nvs_set_i32(nvs, "tzOffset", gmt_offset_sec);
+        nvs_set_i32(nvs, "tzOffset", gmt_offset_sec);
+
+        // Save press days list
+        if (press_days_count > 0) {
+            nvs_set_blob(nvs, "pressDays", press_days, press_days_count * sizeof(int32_t));
+        } else {
+            nvs_erase_key(nvs, "pressDays");
         }
         nvs_commit(nvs);
         nvs_close(nvs);
@@ -737,7 +728,7 @@ static void get_current_time_str(char *time_str, size_t len) {
     snprintf(time_str, len, "%d:%02d %s", hour, timeinfo.tm_min, ampm);
 }
 
-static void send_webhook(bool state) {
+static void send_webhook_internal(bool state) {
     wifi_ap_record_t ap_info;
     if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) {
         ESP_LOGW(TAG, "Webhook skipped - WiFi not connected");
@@ -802,6 +793,43 @@ static void send_webhook(bool state) {
     esp_http_client_cleanup(client);
 }
 
+// Webhook task - processes queue and sends only the final settled state
+static void webhook_task(void *pvParameters) {
+    bool pending_state;
+
+    while (1) {
+        // Wait for a webhook request
+        if (xQueueReceive(s_webhook_queue, &pending_state, portMAX_DELAY) == pdTRUE) {
+            // Drain any additional queued requests to get the final state
+            bool latest_state = pending_state;
+            while (xQueueReceive(s_webhook_queue, &latest_state, 0) == pdTRUE) {
+                // Keep draining to get the most recent state
+            }
+
+            // Send the webhook with the final settled state
+            send_webhook_internal(latest_state);
+        }
+    }
+}
+
+// Queue a webhook request (non-blocking)
+static void send_webhook(bool state) {
+    if (s_webhook_queue == NULL) {
+        ESP_LOGW(TAG, "Webhook queue not initialized");
+        return;
+    }
+
+    // Overwrite mode: if queue is full, remove oldest and add new
+    if (xQueueSend(s_webhook_queue, &state, 0) != pdTRUE) {
+        // Queue full - drain one item and try again
+        bool dummy;
+        xQueueReceive(s_webhook_queue, &dummy, 0);
+        xQueueSend(s_webhook_queue, &state, 0);
+    }
+
+    ESP_LOGI(TAG, "Webhook queued: %s", state ? "ON" : "OFF");
+}
+
 static void generate_claim_code(char *code, size_t len) {
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -858,9 +886,8 @@ static void clear_streak_data(void) {
         nvs_close(nvs);
         ESP_LOGI(TAG, "Streak data cleared");
     }
-    streak_data = 0;
-    today_state = false;
-    last_day = -1;
+    press_days_count = 0;
+    last_checked_day = -1;
     update_leds();
 }
 
@@ -1425,6 +1452,16 @@ void app_main(void) {
     // Sync time
     sync_ntp();
 
+    // Initialize webhook queue and task (must be after WiFi is connected)
+    // Priority 1 = same as main loop, lower than TLS/WiFi tasks, so button handling isn't starved
+    s_webhook_queue = xQueueCreate(8, sizeof(bool));
+    if (s_webhook_queue != NULL) {
+        xTaskCreate(webhook_task, "webhook", 4096, NULL, 1, &s_webhook_task);
+        ESP_LOGI(TAG, "Webhook task started");
+    } else {
+        ESP_LOGE(TAG, "Failed to create webhook queue");
+    }
+
     // Stop animation and restore streak LEDs before main loop
     stop_led_animation();
     update_leds();
@@ -1436,6 +1473,6 @@ void app_main(void) {
         check_midnight_rollover();
         check_timezone_refresh();
 
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
