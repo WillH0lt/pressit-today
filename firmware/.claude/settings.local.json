@@ -8,7 +8,8 @@
       "Bash(cmd /c \"pio run\")",
       "Bash(~/.platformio/penv/Scripts/pio.exe run:*)",
       "Bash(del:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(npm run build:*)"
     ],
     "deny": [],
     "ask": []

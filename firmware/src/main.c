@@ -32,6 +32,7 @@
 #include "lwip/sys.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
+#include "esp_timer.h"
 
 #include "captive_portal.h"
 
@@ -83,23 +84,22 @@ static bool s_hmac_available = false;
 #define WIFI_MAXIMUM_RETRY 5
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
-#define AP_SSID            "The Thing Will Gave Me"
+#define AP_SSID            "pressit.today"
 
 static EventGroupHandle_t s_wifi_event_group = NULL;
-static int s_retry_num = 0;
 static bool s_provisioning_done = false;
 static char s_claim_code[12] = {0};
 
 // ============== STATE ==============
-static int32_t press_days[7] = {0};  // Epoch days when button was pressed
-static int press_days_count = 0;
+// Indexed by day of week: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+// Each slot holds the Unix timestamp when the button was pressed (0 = not pressed)
+static int64_t press_times[7] = {0};
 static int32_t last_checked_day = -1;  // Track current day for midnight rollover
 static int last_tz_refresh_day = -1;  // Track when we last refreshed timezone
 static bool button_pressed = false;
 static const uint32_t DEBOUNCE_DELAY = 50;
 static bool last_button_state = true;
 static bool ntp_synced = false;
-static bool s_netif_initialized = false;
 
 // Animation state
 static int animation_index = 0;
@@ -113,9 +113,13 @@ static httpd_handle_t s_httpd = NULL;
 // DNS task handle
 static TaskHandle_t s_dns_task = NULL;
 
+// WiFi reconnect timer
+static esp_timer_handle_t s_reconnect_timer = NULL;
+
 // Webhook task state
 static TaskHandle_t s_webhook_task = NULL;
 static QueueHandle_t s_webhook_queue = NULL;
+static esp_timer_handle_t s_webhook_retry_timer = NULL;
 
 
 // ============== FUNCTION DECLARATIONS ==============
@@ -127,16 +131,15 @@ static void handle_button(void);
 static void check_midnight_rollover(void);
 static void save_streak(void);
 static void load_streak(void);
-static void prune_press_days(int32_t today);
+static void prune_press_times(int32_t today);
 static void sync_ntp(void);
 static int get_current_day(void);
-static void send_webhook_internal(bool state);
-static void send_webhook(bool state);
+static bool send_webhook_internal(void);
+static void send_webhook(void);
 static void webhook_task(void *pvParameters);
 static void get_mac_address(char *mac_str, size_t len);
 static void get_current_date(char *date_str, size_t len);
 static void generate_claim_code(char *code, size_t len);
-static bool connect_with_saved_credentials(void);
 static void save_wifi_credentials(const char *ssid, const char *password);
 static void start_provisioning_mode(void);
 static void fetch_timezone(void);
@@ -201,6 +204,13 @@ static bool calculate_hmac_signature(const char *message, size_t message_len, ch
     return true;
 }
 
+// ============== WIFI RECONNECT TIMER ==============
+
+static void wifi_reconnect_timer_callback(void *arg) {
+    ESP_LOGI(TAG, "Attempting WiFi reconnection...");
+    esp_wifi_connect();
+}
+
 // ============== WIFI EVENT HANDLER ==============
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -208,22 +218,31 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_num < WIFI_MAXIMUM_RETRY) {
-            esp_wifi_connect();
-            s_retry_num++;
-            ESP_LOGI(TAG, "Retrying WiFi connection...");
-        } else {
-            if (s_wifi_event_group) {
-                xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-            }
+        ESP_LOGI(TAG, "WiFi disconnected - will retry in 5 seconds");
+        // Create timer lazily if needed
+        if (s_reconnect_timer == NULL) {
+            esp_timer_create_args_t timer_args = {
+                .callback = wifi_reconnect_timer_callback,
+                .name = "wifi_reconnect",
+            };
+            esp_timer_create(&timer_args, &s_reconnect_timer);
         }
-        ESP_LOGI(TAG, "WiFi connection failed");
+        // Start one-shot timer for 5 seconds (value in microseconds)
+        esp_timer_stop(s_reconnect_timer);  // Stop if already running
+        esp_timer_start_once(s_reconnect_timer, 5000000);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        s_retry_num = 0;
         if (s_wifi_event_group) {
             xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        }
+
+        // Sync press data when WiFi reconnects (only if NTP already synced)
+        // Initial sync happens in app_main after NTP sync completes
+        if (s_webhook_queue != NULL && ntp_synced) {
+            ESP_LOGI(TAG, "WiFi reconnected - syncing press data");
+            uint8_t trigger = 1;
+            xQueueSend(s_webhook_queue, &trigger, 0);
         }
     }
 }
@@ -248,12 +267,24 @@ static void setup_leds(void) {
     }
 }
 
-// Check if a given epoch day is in the press_days list
+// Get epoch day from a timestamp
+static int32_t timestamp_to_epoch_day(int64_t timestamp) {
+    return (int32_t)((timestamp + gmt_offset_sec) / 86400);
+}
+
+// Get day of week (0=Sunday, 6=Saturday) from epoch day
+// Epoch day 0 (Jan 1, 1970) was a Thursday (4)
+static int epoch_day_to_weekday(int32_t day) {
+    return (day + 4) % 7;
+}
+
+// Check if a given epoch day has a press recorded
+// press_times is indexed by day of week: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
 static bool is_day_pressed(int32_t day) {
-    for (int i = 0; i < press_days_count; i++) {
-        if (press_days[i] == day) return true;
-    }
-    return false;
+    int weekday = epoch_day_to_weekday(day);
+    int64_t ts = press_times[weekday];
+    // Check if this slot has a timestamp from the requested day
+    return ts != 0 && timestamp_to_epoch_day(ts) == day;
 }
 
 static void update_leds(void) {
@@ -414,33 +445,24 @@ static void handle_button(void) {
         if (reading == 0 && !button_pressed) {
             button_pressed = true;
             int32_t today = get_current_day();
+            int weekday = epoch_day_to_weekday(today);
             bool was_pressed = is_day_pressed(today);
 
             if (was_pressed) {
-                // Remove today from press_days
-                for (int i = 0; i < press_days_count; i++) {
-                    if (press_days[i] == today) {
-                        for (int j = i; j < press_days_count - 1; j++) {
-                            press_days[j] = press_days[j + 1];
-                        }
-                        press_days_count--;
-                        break;
-                    }
-                }
+                // Clear today's press
+                press_times[weekday] = 0;
             } else {
-                // Add today to press_days
-                if (press_days_count < 7) {
-                    press_days[press_days_count++] = today;
-                }
+                // Record press in today's weekday slot
+                time_t now;
+                time(&now);
+                press_times[weekday] = (int64_t)now;
             }
 
-            bool now_pressed = !was_pressed;
             update_leds();
             save_streak();
-            send_webhook(now_pressed);
+            send_webhook();
 
-            ESP_LOGI(TAG, "Today toggled: %s (press_days_count=%d)",
-                     now_pressed ? "ON" : "OFF", press_days_count);
+            ESP_LOGI(TAG, "Today toggled: %s", !was_pressed ? "ON" : "OFF");
         } else if (reading == 1) {
             button_pressed = false;
         }
@@ -540,18 +562,13 @@ static void sync_ntp(void) {
 
     ESP_LOGI(TAG, "SNTP initialized, waiting for sync...");
 
-    // Wait for sync using our callback flag
-    int attempts = 0;
-    while (!ntp_synced && attempts < 120) {
+    // Wait indefinitely for sync
+    while (!ntp_synced) {
         vTaskDelay(pdMS_TO_TICKS(1000));
-
-        // Check SNTP status for debugging
-        sntp_sync_status_t status = sntp_get_sync_status();
-        ESP_LOGI(TAG, "Waiting for NTP sync... (status: %d, attempt %d/120)", status, attempts + 1);
-        attempts++;
     }
 
-    if (ntp_synced) {
+    // Time is now synced
+    {
         setenv("TZ", "UTC", 1);
         tzset();
 
@@ -568,11 +585,9 @@ static void sync_ntp(void) {
                  timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, (long)current_epoch_day);
 
         // Prune old days
-        prune_press_days(current_epoch_day);
+        prune_press_times(current_epoch_day);
         last_checked_day = current_epoch_day;
         save_streak();
-    } else {
-        ESP_LOGW(TAG, "Failed to sync time - using saved state");
     }
 }
 
@@ -593,7 +608,7 @@ static void check_midnight_rollover(void) {
                  (long)last_checked_day, (long)current_day);
 
         // Prune old days for the new day
-        prune_press_days(current_day);
+        prune_press_times(current_day);
         update_leds();
         save_streak();
     }
@@ -632,32 +647,29 @@ static void load_streak(void) {
         nvs_get_i32(nvs, "tzOffset", &tz_offset);
         gmt_offset_sec = tz_offset;  // Restore last known timezone
 
-        // Load press days list
-        size_t size = sizeof(press_days);
-        if (nvs_get_blob(nvs, "pressDays", press_days, &size) == ESP_OK) {
-            press_days_count = size / sizeof(int32_t);
-        } else {
-            press_days_count = 0;
-        }
+        // Load all 7 slots (56 bytes) - missing/partial data leaves slots as 0
+        size_t size = sizeof(press_times);
+        nvs_get_blob(nvs, "pressTimes", press_times, &size);
         nvs_close(nvs);
     }
 
-    ESP_LOGI(TAG, "Loaded %d press days, tzOffset=%ld", press_days_count, gmt_offset_sec);
+    ESP_LOGI(TAG, "Loaded press times, tzOffset=%ld", gmt_offset_sec);
 }
 
-// Prune old days from press_days (more than 6 days ago)
-static void prune_press_days(int32_t today) {
-    int new_count = 0;
-    for (int i = 0; i < press_days_count; i++) {
-        int days_ago = today - press_days[i];
-        if (days_ago >= 0 && days_ago < 7) {
-            press_days[new_count++] = press_days[i];
+// Prune old presses (more than 6 days ago)
+static void prune_press_times(int32_t today) {
+    for (int i = 0; i < 7; i++) {
+        if (press_times[i] != 0) {
+            int32_t press_day = timestamp_to_epoch_day(press_times[i]);
+            int days_ago = today - press_day;
+            if (days_ago < 0 || days_ago >= 7) {
+                press_times[i] = 0;  // Clear old/invalid press
+            }
         }
     }
-    press_days_count = new_count;
 
-    ESP_LOGI(TAG, "Pruned press_days for day %ld: %d days stored, today=%s",
-             (long)today, press_days_count, is_day_pressed(today) ? "ON" : "OFF");
+    ESP_LOGI(TAG, "Pruned press_times for day %ld, today=%s",
+             (long)today, is_day_pressed(today) ? "ON" : "OFF");
 }
 
 static void save_streak(void) {
@@ -665,12 +677,9 @@ static void save_streak(void) {
     if (nvs_open("streak", NVS_READWRITE, &nvs) == ESP_OK) {
         nvs_set_i32(nvs, "tzOffset", gmt_offset_sec);
 
-        // Save press days list
-        if (press_days_count > 0) {
-            nvs_set_blob(nvs, "pressDays", press_days, press_days_count * sizeof(int32_t));
-        } else {
-            nvs_erase_key(nvs, "pressDays");
-        }
+        // Always save all 7 slots (56 bytes) - empty slots are 0
+        nvs_set_blob(nvs, "pressTimes", press_times, sizeof(press_times));
+
         nvs_commit(nvs);
         nvs_close(nvs);
     }
@@ -728,31 +737,60 @@ static void get_current_time_str(char *time_str, size_t len) {
     snprintf(time_str, len, "%d:%02d %s", hour, timeinfo.tm_min, ampm);
 }
 
-static void send_webhook_internal(bool state) {
+// Send the full press_times array to the server
+// Returns true on success, false on failure
+static bool send_webhook_internal(void) {
     wifi_ap_record_t ap_info;
     if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) {
         ESP_LOGW(TAG, "Webhook skipped - WiFi not connected");
-        return;
+        return false;
     }
 
     char mac_str[18];
-    char date_str[11];
-    char time_str[12];
     get_mac_address(mac_str, sizeof(mac_str));
-    get_current_date(date_str, sizeof(date_str));
-    get_current_time_str(time_str, sizeof(time_str));
 
-    // Get Unix timestamp for replay protection
+    // Get current time for replay protection
     time_t now;
     time(&now);
 
-    // Build payload with timestamp and local time
-    char payload[256];
-    snprintf(payload, sizeof(payload),
-             "{\"mac\":\"%s\",\"state\":%s,\"date\":\"%s\",\"timestamp\":%lld,\"time\":\"%s\"}",
-             mac_str, state ? "true" : "false", date_str, (long long)now, time_str);
+    // Build the presses array JSON
+    // Format: [{"date":"YYYY-MM-DD","timestamp":1234567890}, ...]
+    char presses_json[512];
+    int offset = 0;
+    int press_count = 0;
+    presses_json[offset++] = '[';
 
-    ESP_LOGI(TAG, "Sending webhook: %s", payload);
+    for (int i = 0; i < 7; i++) {
+        if (press_times[i] == 0) continue;  // Skip empty slots
+
+        // Convert timestamp to date string
+        time_t press_time = (time_t)press_times[i];
+        time_t local_press_time = press_time + gmt_offset_sec;
+        struct tm timeinfo;
+        localtime_r(&local_press_time, &timeinfo);
+        char day_date[11];
+        snprintf(day_date, sizeof(day_date), "%04d-%02d-%02d",
+                 timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday);
+
+        if (press_count > 0) {
+            presses_json[offset++] = ',';
+        }
+        offset += snprintf(presses_json + offset, sizeof(presses_json) - offset,
+                           "{\"date\":\"%s\",\"timestamp\":%lld}",
+                           day_date, (long long)press_times[i]);
+        press_count++;
+    }
+    presses_json[offset++] = ']';
+    presses_json[offset] = '\0';
+
+    // Build full payload
+    // {"mac":"...","presses":[...],"timestamp":...}
+    char payload[600];
+    snprintf(payload, sizeof(payload),
+             "{\"mac\":\"%s\",\"presses\":%s,\"timestamp\":%lld}",
+             mac_str, presses_json, (long long)now);
+
+    ESP_LOGI(TAG, "Sending webhook with %d presses: %s", press_count, payload);
 
     // Reset response buffer
     webhook_response_len = 0;
@@ -778,11 +816,13 @@ static void send_webhook_internal(bool state) {
 
     esp_http_client_set_post_field(client, payload, strlen(payload));
 
+    bool success = false;
     esp_err_t err = esp_http_client_perform(client);
     if (err == ESP_OK) {
         int status = esp_http_client_get_status_code(client);
         if (status >= 200 && status < 300) {
             ESP_LOGI(TAG, "Webhook response: %d", status);
+            success = true;
         } else {
             ESP_LOGE(TAG, "Webhook error: %d - %s", status, webhook_response_buffer);
         }
@@ -791,43 +831,64 @@ static void send_webhook_internal(bool state) {
     }
 
     esp_http_client_cleanup(client);
+    return success;
 }
 
-// Webhook task - processes queue and sends only the final settled state
+// Timer callback to retry webhook
+static void webhook_retry_timer_callback(void *arg) {
+    if (s_webhook_queue != NULL) {
+        uint8_t trigger = 1;
+        xQueueSend(s_webhook_queue, &trigger, 0);
+    }
+}
+
+// Webhook task - processes queue and sends full press_times state
 static void webhook_task(void *pvParameters) {
-    bool pending_state;
+    uint8_t trigger;
+
+    // Create retry timer
+    esp_timer_create_args_t timer_args = {
+        .callback = webhook_retry_timer_callback,
+        .name = "webhook_retry",
+    };
+    esp_timer_create(&timer_args, &s_webhook_retry_timer);
 
     while (1) {
-        // Wait for a webhook request
-        if (xQueueReceive(s_webhook_queue, &pending_state, portMAX_DELAY) == pdTRUE) {
-            // Drain any additional queued requests to get the final state
-            bool latest_state = pending_state;
-            while (xQueueReceive(s_webhook_queue, &latest_state, 0) == pdTRUE) {
-                // Keep draining to get the most recent state
+        // Wait for a sync trigger
+        if (xQueueReceive(s_webhook_queue, &trigger, portMAX_DELAY) == pdTRUE) {
+            // Drain any additional queued requests (we only need one sync)
+            while (xQueueReceive(s_webhook_queue, &trigger, 0) == pdTRUE) {
+                // Keep draining - we'll send the current state regardless
             }
 
-            // Send the webhook with the final settled state
-            send_webhook_internal(latest_state);
+            // Small delay to let rapid button presses settle
+            vTaskDelay(pdMS_TO_TICKS(500));
+
+            // Try to send, schedule retry if failed
+            if (!send_webhook_internal()) {
+                ESP_LOGW(TAG, "Webhook failed, will retry in 10 seconds...");
+                esp_timer_stop(s_webhook_retry_timer);
+                esp_timer_start_once(s_webhook_retry_timer, 10000000);  // 10 seconds in microseconds
+            }
         }
     }
 }
 
-// Queue a webhook request (non-blocking)
-static void send_webhook(bool state) {
+// Queue a webhook sync request (non-blocking)
+static void send_webhook(void) {
     if (s_webhook_queue == NULL) {
         ESP_LOGW(TAG, "Webhook queue not initialized");
         return;
     }
 
-    // Overwrite mode: if queue is full, remove oldest and add new
-    if (xQueueSend(s_webhook_queue, &state, 0) != pdTRUE) {
-        // Queue full - drain one item and try again
-        bool dummy;
-        xQueueReceive(s_webhook_queue, &dummy, 0);
-        xQueueSend(s_webhook_queue, &state, 0);
+    // Queue a sync trigger (value doesn't matter, just a signal)
+    uint8_t trigger = 1;
+    if (xQueueSend(s_webhook_queue, &trigger, 0) != pdTRUE) {
+        // Queue full - that's fine, a sync is already pending
+        ESP_LOGI(TAG, "Webhook sync already queued");
+    } else {
+        ESP_LOGI(TAG, "Webhook sync queued");
     }
-
-    ESP_LOGI(TAG, "Webhook queued: %s", state ? "ON" : "OFF");
 }
 
 static void generate_claim_code(char *code, size_t len) {
@@ -886,7 +947,7 @@ static void clear_streak_data(void) {
         nvs_close(nvs);
         ESP_LOGI(TAG, "Streak data cleared");
     }
-    press_days_count = 0;
+    memset(press_times, 0, sizeof(press_times));
     last_checked_day = -1;
     update_leds();
 }
@@ -1030,7 +1091,6 @@ static esp_err_t http_connect_handler(httpd_req_t *req) {
     }
 
     // Clear previous connection state
-    s_retry_num = 0;
     if (s_wifi_event_group) {
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
     }
@@ -1257,13 +1317,27 @@ static void dns_server_task(void *pvParameters) {
 static void start_provisioning_mode(void) {
     ESP_LOGI(TAG, "Starting WiFi provisioning (captive portal)...");
 
-    // Initialize networking if not already done
-    if (!s_netif_initialized) {
-        ESP_ERROR_CHECK(esp_netif_init());
-        ESP_ERROR_CHECK(esp_event_loop_create_default());
-        esp_netif_create_default_wifi_sta();
-        s_netif_initialized = true;
+    // Check for saved credentials to try in background
+    nvs_handle_t nvs;
+    char saved_ssid[33] = {0};
+    char saved_password[65] = {0};
+    bool has_saved_credentials = false;
+
+    if (nvs_open("wifi", NVS_READONLY, &nvs) == ESP_OK) {
+        size_t ssid_len = sizeof(saved_ssid);
+        size_t pass_len = sizeof(saved_password);
+        if (nvs_get_str(nvs, "ssid", saved_ssid, &ssid_len) == ESP_OK && strlen(saved_ssid) > 0) {
+            nvs_get_str(nvs, "password", saved_password, &pass_len);
+            has_saved_credentials = true;
+            ESP_LOGI(TAG, "Will also try saved network: %s", saved_ssid);
+        }
+        nvs_close(nvs);
     }
+
+    // Initialize networking
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
 
     // Create AP interface
     esp_netif_create_default_wifi_ap();
@@ -1297,6 +1371,17 @@ static void start_provisioning_mode(void) {
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+
+    // Configure STA with saved credentials or clear any stale driver config
+    wifi_config_t sta_config = {0};
+    if (has_saved_credentials) {
+        sta_config.sta.threshold.authmode = strlen(saved_password) > 0 ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+        strncpy((char *)sta_config.sta.ssid, saved_ssid, sizeof(sta_config.sta.ssid) - 1);
+        strncpy((char *)sta_config.sta.password, saved_password, sizeof(sta_config.sta.password) - 1);
+    }
+    // Always set config - clears driver's internal storage if no saved credentials
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
+
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "AP started: %s", AP_SSID);
@@ -1307,8 +1392,15 @@ static void start_provisioning_mode(void) {
     // Start HTTP server
     start_webserver();
 
-    // Wait for provisioning to complete
+    // Wait for provisioning to complete OR saved credentials to connect
     while (!s_provisioning_done) {
+        // Check if saved credentials connected successfully
+        EventBits_t bits = xEventGroupGetBits(s_wifi_event_group);
+        if (bits & WIFI_CONNECTED_BIT) {
+            ESP_LOGI(TAG, "Connected with saved credentials!");
+            s_provisioning_done = true;
+            break;
+        }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
@@ -1323,82 +1415,6 @@ static void start_provisioning_mode(void) {
 
     // Switch to STA only mode
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-}
-
-static bool connect_with_saved_credentials(void) {
-    nvs_handle_t nvs;
-    char ssid[33] = {0};
-    char password[65] = {0};
-    size_t ssid_len = sizeof(ssid);
-    size_t pass_len = sizeof(password);
-
-    if (nvs_open("wifi", NVS_READONLY, &nvs) != ESP_OK) {
-        ESP_LOGI(TAG, "No saved WiFi credentials found");
-        return false;
-    }
-
-    esp_err_t err = nvs_get_str(nvs, "ssid", ssid, &ssid_len);
-    if (err != ESP_OK || strlen(ssid) == 0) {
-        nvs_close(nvs);
-        ESP_LOGI(TAG, "No saved WiFi credentials found");
-        return false;
-    }
-
-    nvs_get_str(nvs, "password", password, &pass_len);
-    nvs_close(nvs);
-
-    ESP_LOGI(TAG, "Attempting to connect to saved network: %s", ssid);
-
-    // Initialize networking
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
-    s_netif_initialized = true;
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    s_wifi_event_group = xEventGroupCreate();
-
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &wifi_event_handler,
-                                                        NULL, NULL));
-
-    wifi_config_t wifi_config = {
-        .sta = {
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-        },
-    };
-    strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
-    strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    // Wait for connection
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                           pdFALSE, pdFALSE,
-                                           pdMS_TO_TICKS(15000));
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Connected to %s", ssid);
-        return true;
-    }
-
-    ESP_LOGW(TAG, "Failed to connect with saved credentials");
-    esp_wifi_stop();
-    esp_wifi_deinit();
-    // Note: esp_netif is kept initialized for provisioning mode
-    vEventGroupDelete(s_wifi_event_group);
-    s_wifi_event_group = NULL;
-
-    return false;
 }
 
 // ============== MAIN ==============
@@ -1441,26 +1457,24 @@ void app_main(void) {
     // Load saved streak data
     load_streak();
 
-    // Try to connect with saved WiFi credentials
-    if (connect_with_saved_credentials()) {
-        ESP_LOGI(TAG, "Connected with saved credentials!");
-    } else {
-        ESP_LOGI(TAG, "No saved credentials or connection failed, starting provisioning...");
-        start_provisioning_mode();
-    }
-
-    // Sync time
-    sync_ntp();
-
-    // Initialize webhook queue and task (must be after WiFi is connected)
-    // Priority 1 = same as main loop, lower than TLS/WiFi tasks, so button handling isn't starved
-    s_webhook_queue = xQueueCreate(8, sizeof(bool));
+    // Initialize webhook queue and task before WiFi so IP_EVENT can queue syncs
+    s_webhook_queue = xQueueCreate(8, sizeof(uint8_t));
     if (s_webhook_queue != NULL) {
         xTaskCreate(webhook_task, "webhook", 4096, NULL, 1, &s_webhook_task);
         ESP_LOGI(TAG, "Webhook task started");
     } else {
         ESP_LOGE(TAG, "Failed to create webhook queue");
     }
+
+    // Start WiFi - runs captive portal while trying saved credentials in background
+    start_provisioning_mode();
+
+    // Sync time
+    sync_ntp();
+
+    // Now that NTP is synced and timezone is set, send initial press data
+    ESP_LOGI(TAG, "NTP synced - sending initial press data");
+    send_webhook();
 
     // Stop animation and restore streak LEDs before main loop
     stop_led_animation();

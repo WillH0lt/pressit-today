@@ -43,7 +43,7 @@ export const claimDevice = onCall(
     if (!request.auth) {
       throw new HttpsError(
         "unauthenticated",
-        "Must be logged in to link a device"
+        "Must be logged in to link a device",
       );
     }
 
@@ -86,7 +86,7 @@ export const claimDevice = onCall(
         deviceId: deviceDoc.id,
         deviceClaimedAt: admin.firestore.FieldValue.serverTimestamp(),
       },
-      { merge: true }
+      { merge: true },
     );
 
     await batch.commit();
@@ -96,15 +96,18 @@ export const claimDevice = onCall(
       message: "Device linked successfully",
       macAddress: deviceData.macAddress,
     };
-  }
+  },
 );
+
+interface PressEntry {
+  date: string; // YYYY-MM-DD in device's local time
+  timestamp: number; // Unix timestamp when button was pressed
+}
 
 interface ButtonPressData {
   mac: string;
-  state: boolean;
-  date: string; // YYYY-MM-DD in device's local time
-  timestamp: number; // Unix timestamp for replay protection
-  time: string; // Local time when button was pressed (e.g., "6:41 AM")
+  presses: PressEntry[]; // Array of all presses for the last week
+  timestamp: number; // Current Unix timestamp for replay protection
 }
 
 // Maximum allowed time difference for replay protection (5 minutes)
@@ -117,7 +120,7 @@ const MAX_TIMESTAMP_DRIFT_SECONDS = 300;
 function verifyHmacSignature(
   payload: string,
   signature: string,
-  secret: string
+  secret: string,
 ): boolean {
   try {
     // Secret is stored as hex, convert to buffer
@@ -130,7 +133,7 @@ function verifyHmacSignature(
     // Constant-time comparison
     return crypto.timingSafeEqual(
       Buffer.from(signature, "hex"),
-      Buffer.from(expectedSignature, "hex")
+      Buffer.from(expectedSignature, "hex"),
     );
   } catch {
     return false;
@@ -154,7 +157,7 @@ interface HmacVerificationResult {
 function verifyDeviceRequest(
   req: Request,
   secret: string,
-  requireTimestamp = true
+  requireTimestamp = true,
 ): HmacVerificationResult {
   // Get raw body for signature verification
   const rawBody =
@@ -196,7 +199,12 @@ function verifyDeviceRequest(
 /**
  * HTTP endpoint to receive button presses from devices.
  *
- * Expected input: { mac: "AA:BB:CC:DD:EE:FF", state: true, date: "2025-01-15", timestamp: 1234567890 }
+ * Expected input:
+ * {
+ *   mac: "AA:BB:CC:DD:EE:FF",
+ *   presses: [{ date: "2025-01-15", timestamp: 1234567890 }, ...],
+ *   timestamp: 1234567890
+ * }
  * Header: X-HMAC-Signature: <hex-encoded HMAC-SHA256 of request body>
  *
  * This function:
@@ -204,8 +212,9 @@ function verifyDeviceRequest(
  * 2. Validates timestamp to prevent replay attacks
  * 3. Validates the request payload
  * 4. Looks up the device by MAC address
- * 5. If state is true: saves the button press timestamp to device subcollection
- * 6. If state is false: deletes the button press for that date
+ * 5. Syncs the presses subcollection to match the incoming array
+ *    - Adds/updates presses that are in the array
+ *    - Deletes presses within the week window that are not in the array
  *
  * Presses are stored on the device, allowing tracking before the device is claimed.
  */
@@ -223,12 +232,14 @@ export const buttonPress = onRequest(
     if (secret) {
       const verification = verifyDeviceRequest(req, secret, true);
       if (!verification.valid) {
-        res.status(verification.statusCode!).json({ error: verification.error });
+        res
+          .status(verification.statusCode!)
+          .json({ error: verification.error });
         return;
       }
     }
 
-    const { mac, state, date, time } = req.body as ButtonPressData;
+    const { mac, presses } = req.body as ButtonPressData;
 
     // Validate input
     if (!mac || typeof mac !== "string") {
@@ -236,37 +247,32 @@ export const buttonPress = onRequest(
       return;
     }
 
-    if (typeof state !== "boolean") {
-      res.status(400).json({ error: "State must be a boolean" });
+    if (!Array.isArray(presses)) {
+      res.status(400).json({ error: "Presses must be an array" });
       return;
     }
 
-    if (
-      !date ||
-      typeof date !== "string" ||
-      !/^\d{4}-\d{2}-\d{2}$/.test(date)
-    ) {
-      res.status(400).json({ error: "Date must be in YYYY-MM-DD format" });
-      return;
-    }
-
-    if (
-      !time ||
-      typeof time !== "string" ||
-      !/^\d{1,2}:\d{2} (AM|PM)$/.test(time)
-    ) {
-      res.status(400).json({ error: "Time must be in H:MM AM/PM format" });
-      return;
+    // Validate each press entry
+    for (const press of presses) {
+      if (
+        !press.date ||
+        typeof press.date !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(press.date)
+      ) {
+        res
+          .status(400)
+          .json({ error: "Each press must have a date in YYYY-MM-DD format" });
+        return;
+      }
+      if (typeof press.timestamp !== "number") {
+        res
+          .status(400)
+          .json({ error: "Each press must have a numeric timestamp" });
+        return;
+      }
     }
 
     const normalizedMac = mac.toUpperCase().trim();
-
-    console.log("Received button press:", {
-      mac: normalizedMac,
-      state,
-      date,
-      time,
-    });
 
     // Look up the device by MAC address
     const devicesRef = db.collection("devices");
@@ -281,30 +287,57 @@ export const buttonPress = onRequest(
     }
 
     const deviceDoc = snapshot.docs[0];
-
-    // Write press to device subcollection (works even before device is claimed)
-    const pressRef = db
+    const pressesRef = db
       .collection("devices")
       .doc(deviceDoc.id)
-      .collection("presses")
-      .doc(date);
+      .collection("presses");
 
-    if (state) {
-      // Save the button press
-      await pressRef.set({
-        date,
-        time,
-        pressedAt: admin.firestore.FieldValue.serverTimestamp(),
+    // Calculate the week window based on server time (today and 6 days before)
+    const now = new Date();
+    const weekStart = new Date(now);
+    weekStart.setDate(weekStart.getDate() - 6);
+    const weekStartStr = weekStart.toISOString().split("T")[0];
+
+    // Get existing presses from the last week only (doc ID is the date string)
+    const existingPresses = await pressesRef
+      .where(admin.firestore.FieldPath.documentId(), ">=", weekStartStr)
+      .get();
+    const existingDates = new Set(existingPresses.docs.map((doc) => doc.id));
+
+    // Build set of incoming dates
+    const incomingDates = new Set(presses.map((p) => p.date));
+
+    // Use batch for atomic updates
+    const batch = db.batch();
+
+    // Add/update presses from the incoming array
+    for (const press of presses) {
+      const pressRef = pressesRef.doc(press.date);
+      batch.set(pressRef, {
+        date: press.date,
+        pressedAt: admin.firestore.Timestamp.fromMillis(press.timestamp * 1000),
       });
-
-      res.status(200).json({ success: true, message: "Press recorded" });
-    } else {
-      // Delete the button press
-      await pressRef.delete();
-
-      res.status(200).json({ success: true, message: "Press deleted" });
     }
-  }
+
+    // Delete presses that exist but are not in incoming array
+    // (query already filtered to last week, so all existingDates are in window)
+    for (const existingDate of existingDates) {
+      if (!incomingDates.has(existingDate)) {
+        const pressRef = pressesRef.doc(existingDate);
+        batch.delete(pressRef);
+        console.log(`Deleting stale press for ${existingDate}`);
+      }
+    }
+
+    await batch.commit();
+
+    console.log(`Synced ${presses.length} presses for device ${normalizedMac}`);
+
+    res.status(200).json({
+      success: true,
+      message: `Synced ${presses.length} presses`,
+    });
+  },
 );
 
 /**
@@ -318,7 +351,7 @@ export const unlinkDevice = onCall(async (request: CallableRequest) => {
   if (!request.auth) {
     throw new HttpsError(
       "unauthenticated",
-      "Must be logged in to unlink device"
+      "Must be logged in to unlink device",
     );
   }
 
@@ -357,7 +390,7 @@ export const clearPresses = onCall(async (request: CallableRequest) => {
   if (!request.auth) {
     throw new HttpsError(
       "unauthenticated",
-      "Must be logged in to clear presses"
+      "Must be logged in to clear presses",
     );
   }
 
@@ -414,7 +447,7 @@ export const deleteAccount = onCall(async (request: CallableRequest) => {
   if (!request.auth) {
     throw new HttpsError(
       "unauthenticated",
-      "Must be logged in to delete account"
+      "Must be logged in to delete account",
     );
   }
 
@@ -453,7 +486,9 @@ export const getTimezone = onRequest(
     if (secret) {
       const verification = verifyDeviceRequest(req, secret, false);
       if (!verification.valid) {
-        res.status(verification.statusCode!).json({ error: verification.error });
+        res
+          .status(verification.statusCode!)
+          .json({ error: verification.error });
         return;
       }
     }
@@ -479,7 +514,7 @@ export const getTimezone = onRequest(
 
     try {
       const response = await fetch(
-        `https://iplocate.io/api/lookup/${clientIp}?apikey=${apiKey}`
+        `https://iplocate.io/api/lookup/${clientIp}?apikey=${apiKey}`,
       );
 
       if (!response.ok) {
@@ -518,7 +553,7 @@ export const getTimezone = onRequest(
       }
 
       console.log(
-        `Timezone lookup for ${clientIp}: ${data.time_zone} (offset: ${offsetSeconds}s)`
+        `Timezone lookup for ${clientIp}: ${data.time_zone} (offset: ${offsetSeconds}s)`,
       );
 
       res.status(200).json({ offset: offsetSeconds });
@@ -526,5 +561,5 @@ export const getTimezone = onRequest(
       console.error("Timezone lookup error:", error);
       res.status(500).json({ error: "Internal error" });
     }
-  }
+  },
 );
